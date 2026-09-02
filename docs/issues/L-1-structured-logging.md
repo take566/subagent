@@ -1,5 +1,5 @@
 ---
-title: "[L-1] Observability: task_id / correlation_id 付き構造化ログ"
+title: [L-1] Observability: task_id / correlation_id 付き構造化ログ
 labels: enhancement
 ---
 

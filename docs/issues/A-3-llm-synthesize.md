@@ -1,5 +1,5 @@
 ---
-title: "[A-3] Research: LLM ベースの synthesize / confidence"
+title: [A-3] Research: LLM ベースの synthesize / confidence
 labels: enhancement
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: "[L-2] Observability: メトリクス（duration histogram, success rate）とトレース"
+title: [L-2] Observability: メトリクス（duration histogram, success rate）とトレース
 labels: enhancement
 ---
 

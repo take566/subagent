@@ -1,5 +1,5 @@
 ---
-title: "[E-5] 実行タイムアウトと partial failure の集約"
+title: [E-5] 実行タイムアウトと partial failure の集約
 labels: enhancement
 ---
 

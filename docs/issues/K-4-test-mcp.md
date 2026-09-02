@@ -1,5 +1,5 @@
 ---
-title: "[K-4] test: MCP Server の ListTools / CallTool テスト"
+title: [K-4] test: MCP Server の ListTools / CallTool テスト
 labels: enhancement
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: "[E-4] selectSubagent を capability ベースに変更する"
+title: [E-4] selectSubagent を capability ベースに変更する
 labels: enhancement
 ---
 

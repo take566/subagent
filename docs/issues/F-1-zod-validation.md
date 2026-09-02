@@ -1,5 +1,5 @@
 ---
-title: "[F-1] SubagentConfig の入力バリデーションを zod で実装する"
+title: [F-1] SubagentConfig の入力バリデーションを zod で実装する
 labels: enhancement
 ---
 

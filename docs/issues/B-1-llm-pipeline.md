@@ -1,5 +1,5 @@
 ---
-title: "[B-1] CodeGen: LLM による本格コード生成パイプライン"
+title: [B-1] CodeGen: LLM による本格コード生成パイプライン
 labels: enhancement
 ---
 

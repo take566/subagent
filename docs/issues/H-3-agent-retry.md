@@ -1,5 +1,5 @@
 ---
-title: "[H-3] CodeGen/Review/Document でも RetryManager を実際に使う"
+title: [H-3] CodeGen/Review/Document でも RetryManager を実際に使う
 labels: enhancement
 ---
 

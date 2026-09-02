@@ -1,5 +1,5 @@
 ---
-title: "[G-1] FileCreate / Bash / View を共通モジュールに抽出する"
+title: [G-1] FileCreate / Bash / View を共通モジュールに抽出する
 labels: enhancement
 ---
 

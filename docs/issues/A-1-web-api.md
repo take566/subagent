@@ -1,5 +1,5 @@
 ---
-title: "[A-1] Research: web_search / web_fetch の実 API 接続"
+title: [A-1] Research: web_search / web_fetch の実 API 接続
 labels: enhancement
 ---
 

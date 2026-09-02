@@ -1,5 +1,5 @@
 ---
-title: "[H-1] behavior.timeout を AbortSignal で強制する"
+title: [H-1] behavior.timeout を AbortSignal で強制する
 labels: enhancement
 ---
 

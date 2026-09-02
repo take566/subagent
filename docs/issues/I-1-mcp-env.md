@@ -1,5 +1,5 @@
 ---
-title: "[I-1] MCP: AGENT_ID / MAX_CONCURRENT 環境変数を反映する"
+title: [I-1] MCP: AGENT_ID / MAX_CONCURRENT 環境変数を反映する
 labels: enhancement
 ---
 

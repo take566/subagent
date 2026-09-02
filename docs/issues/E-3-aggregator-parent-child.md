@@ -1,5 +1,5 @@
 ---
-title: "[E-3] ResultAggregator の親/子分離ロジックを修正する"
+title: [E-3] ResultAggregator の親/子分離ロジックを修正する
 labels: enhancement
 ---
 

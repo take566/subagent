@@ -18,6 +18,7 @@ for file in "$ISSUE_DIR"/[A-Z]*-*.md; do
   id="$(basename "$file" .md)"
   # frontmatter 風の先頭メタを抽出
   title="$(awk '/^title:/{sub(/^title:[[:space:]]*/,""); print; exit}' "$file")"
+  title="${title#\"}"; title="${title%\"}"
   labels="$(awk '/^labels:/{sub(/^labels:[[:space:]]*/,""); print; exit}' "$file")"
   body_file="$(mktemp)"
   # YAML frontmatter 以降を本文に

@@ -1,5 +1,5 @@
 ---
-title: "[K-1] test: orchestrator / planner / aggregator のユニットテスト"
+title: [K-1] test: orchestrator / planner / aggregator のユニットテスト
 labels: enhancement
 ---
 

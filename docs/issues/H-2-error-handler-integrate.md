@@ -1,5 +1,5 @@
 ---
-title: "[H-2] ErrorHandler を Subagent.execute に統合する"
+title: [H-2] ErrorHandler を Subagent.execute に統合する
 labels: enhancement
 ---
 

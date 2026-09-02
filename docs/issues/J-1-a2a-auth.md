@@ -1,5 +1,5 @@
 ---
-title: "[J-1] Security: A2A 認証（JWT/mTLS）と認可"
+title: [J-1] Security: A2A 認証（JWT/mTLS）と認可
 labels: enhancement
 ---
 

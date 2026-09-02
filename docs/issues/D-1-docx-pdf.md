@@ -1,5 +1,5 @@
 ---
-title: "[D-1] Document: DOCX / PDF 出力サポート"
+title: [D-1] Document: DOCX / PDF 出力サポート
 labels: enhancement
 ---
 

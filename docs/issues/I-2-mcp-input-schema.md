@@ -1,5 +1,5 @@
 ---
-title: "[I-2] MCP: ツールスキーマを inputSchema として正しく公開する"
+title: [I-2] MCP: ツールスキーマを inputSchema として正しく公開する
 labels: enhancement
 ---
 

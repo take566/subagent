@@ -1,5 +1,5 @@
 ---
-title: "[B-2] CodeGen: リファクタ / str_replace ワークフローの実装"
+title: [B-2] CodeGen: リファクタ / str_replace ワークフローの実装
 labels: enhancement
 ---
 

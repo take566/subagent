@@ -1,5 +1,5 @@
 ---
-title: "[K-2] test: A2A / Retry / ErrorHandler のユニットテスト"
+title: [K-2] test: A2A / Retry / ErrorHandler のユニットテスト
 labels: enhancement
 ---
 

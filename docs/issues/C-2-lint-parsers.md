@@ -1,5 +1,5 @@
 ---
-title: "[C-2] Review: Lint 出力パーサの言語別対応"
+title: [C-2] Review: Lint 出力パーサの言語別対応
 labels: enhancement
 ---
 

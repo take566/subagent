@@ -1,5 +1,5 @@
 ---
-title: "[J-2] Security: 出力サニタイズとレート制限"
+title: [J-2] Security: 出力サニタイズとレート制限
 labels: enhancement
 ---
 

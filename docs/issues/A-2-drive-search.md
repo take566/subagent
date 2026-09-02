@@ -1,5 +1,5 @@
 ---
-title: "[A-2] Research: drive_search ツール追加とフォールバック配線"
+title: [A-2] Research: drive_search ツール追加とフォールバック配線
 labels: enhancement
 ---
 

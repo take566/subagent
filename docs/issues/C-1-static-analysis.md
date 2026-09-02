@@ -1,5 +1,5 @@
 ---
-title: "[C-1] Review: criteria 対応の静的解析・セキュリティチェック強化"
+title: [C-1] Review: criteria 対応の静的解析・セキュリティチェック強化
 labels: enhancement
 ---
 

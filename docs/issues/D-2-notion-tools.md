@@ -1,5 +1,5 @@
 ---
-title: "[D-2] Document: Notion tools 統合"
+title: [D-2] Document: Notion tools 統合
 labels: enhancement
 ---
 

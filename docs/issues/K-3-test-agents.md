@@ -1,5 +1,5 @@
 ---
-title: "[K-3] test: 各 Agent のモックツール付き結合テスト"
+title: [K-3] test: 各 Agent のモックツール付き結合テスト
 labels: enhancement
 ---
 

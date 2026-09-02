@@ -1,5 +1,5 @@
 ---
-title: "[E-2] Hierarchical を入れ子 Subagent 制御に対応する"
+title: [E-2] Hierarchical を入れ子 Subagent 制御に対応する
 labels: enhancement
 ---
 
