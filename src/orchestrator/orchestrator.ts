@@ -284,8 +284,8 @@ export class Orchestrator extends EventEmitter {
         throw new Error(`No suitable subagent found for action: ${task.action}`);
       }
 
-      // タスクを実行
-      const result = await subagent.execute(task);
+      // タスクを実行（バリデーション + timeout 付き run）
+      const result = await subagent.run(task);
 
       this.activeTasks.delete(task.id);
       return result;
@@ -330,7 +330,23 @@ export class Orchestrator extends EventEmitter {
     }
 
     if (message.type === 'task_request') {
-      const payload = message.payload as any;
+      const payload = message.payload as {
+        task_id: string;
+        action: string;
+        parameters?: Record<string, unknown>;
+        context?: Task['context'];
+      };
+      if (!payload?.task_id || !payload?.action) {
+        return A2AProtocol.createErrorMessage(
+          'orchestrator',
+          message.from,
+          message.message_id,
+          {
+            code: 'INVALID_PAYLOAD',
+            message: 'task_request payload requires task_id and action',
+          }
+        );
+      }
       const task: Task = {
         id: payload.task_id,
         action: payload.action,

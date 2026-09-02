@@ -123,19 +123,24 @@ export class ResultAggregator {
 
   /**
    * Hierarchical結果を集約
+   * 先頭を親、以降を子として分離する（Orchestrator.executeHierarchical の順序と対応）
    */
   private aggregateHierarchical(results: TaskResult[]): any {
-    // 親タスクの結果と子タスクの結果を分離
-    const parentResults = results.filter(() => {
-      // 実装に応じて親タスクを特定
-      return true; // 簡略化
-    });
+    if (results.length === 0) {
+      return { parent: undefined, children: [] };
+    }
 
+    const [parentResult, ...childResults] = results;
     return {
-      parent: parentResults[0]?.result,
-      children: results.slice(1).map((r) => ({
+      parent: {
+        task_id: parentResult.taskId,
+        result: parentResult.result,
+        status: parentResult.status,
+      },
+      children: childResults.map((r) => ({
         task_id: r.taskId,
         result: r.result,
+        status: r.status,
       })),
     };
   }
