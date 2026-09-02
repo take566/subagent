@@ -3,9 +3,11 @@
  */
 
 export * from './types/index.js';
+export * from './types/validation.js';
 export * from './core/subagent.js';
 export * from './core/tool.js';
 export * from './protocol/a2a.js';
+export * from './protocol/a2a-schema.js';
 export * from './orchestrator/orchestrator.js';
 export * from './orchestrator/task-parser.js';
 export * from './orchestrator/planner.js';

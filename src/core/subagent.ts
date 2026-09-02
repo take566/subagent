@@ -12,8 +12,24 @@ import type {
   ProgressReport,
   AgentStatus,
 } from '../types/index.js';
+import {
+  validateSubagentConfig,
+  validateTaskAgainstInterface,
+  ValidationError,
+} from '../types/validation.js';
 import { ToolRegistry } from './tool.js';
 import { Logger } from '../utils/logger.js';
+
+export class TimeoutError extends Error {
+  readonly code = 'TIMEOUT';
+
+  constructor(timeoutMs: number, taskId?: string) {
+    super(
+      `Task${taskId ? ` ${taskId}` : ''} timed out after ${timeoutMs}ms`
+    );
+    this.name = 'TimeoutError';
+  }
+}
 
 export abstract class Subagent extends EventEmitter {
   protected id: string;
@@ -23,13 +39,16 @@ export abstract class Subagent extends EventEmitter {
   protected state: SubagentState;
   protected config: SubagentConfig;
   protected logger: Logger;
+  /** 現在実行中タスクの AbortSignal（H-1） */
+  protected abortSignal: AbortSignal | null = null;
 
   constructor(config: SubagentConfig, tools: Tool[] = []) {
     super();
-    this.id = config.id;
-    this.name = config.name;
-    this.version = config.version;
-    this.config = config;
+    const validated = validateSubagentConfig(config);
+    this.id = validated.id;
+    this.name = validated.name;
+    this.version = validated.version;
+    this.config = validated;
     this.tools = new ToolRegistry();
     this.logger = new Logger(this.id);
 
@@ -59,9 +78,102 @@ export abstract class Subagent extends EventEmitter {
   abstract execute(task: Task): Promise<TaskResult>;
 
   /**
+   * バリデーション + タイムアウト付きでタスクを実行する入口 (F-1 / H-1)
+   */
+  async run(task: Task): Promise<TaskResult> {
+    this.logger.setContext({
+      task_id: task.id,
+      correlation_id: task.metadata?.correlation_id,
+    });
+
+    try {
+      validateTaskAgainstInterface(task, this.config);
+    } catch (error) {
+      if (error instanceof ValidationError) {
+        this.logger.error('Task validation failed', {
+          task_id: task.id,
+          status: 'failed',
+          details: error.details,
+        });
+        return {
+          taskId: typeof task?.id === 'string' ? task.id : 'unknown',
+          status: 'failed',
+          error: {
+            code: error.code,
+            message: error.message,
+            details: error.details,
+          },
+        };
+      }
+      throw error;
+    }
+
+    const timeoutMs = this.config.behavior.timeout;
+    if (!timeoutMs) {
+      try {
+        return await this.execute(task);
+      } finally {
+        this.logger.clearContext();
+      }
+    }
+
+    const controller = new AbortController();
+    this.abortSignal = controller.signal;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const result = await Promise.race([
+        this.execute(task),
+        new Promise<never>((_, reject) => {
+          controller.signal.addEventListener(
+            'abort',
+            () => reject(new TimeoutError(timeoutMs, task.id)),
+            { once: true }
+          );
+        }),
+      ]);
+      return result;
+    } catch (error) {
+      if (error instanceof TimeoutError) {
+        this.logger.error(error.message, {
+          task_id: task.id,
+          status: 'failed',
+          duration_ms: timeoutMs,
+        });
+        this.updateStatus('failed');
+        return {
+          taskId: task.id,
+          status: 'failed',
+          error: {
+            code: error.code,
+            message: error.message,
+            details: { timeout_ms: timeoutMs },
+          },
+        };
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      this.abortSignal = null;
+      this.logger.clearContext();
+    }
+  }
+
+  /**
+   * 現在の AbortSignal を取得（ツール呼び出しへ伝播用）
+   */
+  protected getAbortSignal(): AbortSignal | null {
+    return this.abortSignal;
+  }
+
+  /**
    * ツールを呼び出し
    */
   protected async callTool(name: string, params: Record<string, any>): Promise<any> {
+    if (this.abortSignal?.aborted) {
+      throw new TimeoutError(this.config.behavior.timeout || 0, this.state.currentTask?.id);
+    }
+
     const tool = this.tools.get(name);
     if (!tool) {
       throw new Error(`Tool ${name} not available for ${this.name}`);
@@ -75,6 +187,12 @@ export abstract class Subagent extends EventEmitter {
     this.logger.debug(`Calling tool: ${name}`, { params });
     try {
       const result = await tool.invoke(params);
+      if (this.abortSignal?.aborted) {
+        throw new TimeoutError(
+          this.config.behavior.timeout || 0,
+          this.state.currentTask?.id
+        );
+      }
       this.logger.debug(`Tool ${name} completed`, { result });
       return result;
     } catch (error) {

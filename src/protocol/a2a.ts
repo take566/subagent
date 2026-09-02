@@ -12,6 +12,9 @@ import type {
   TaskMetrics,
   Priority,
 } from '../types/index.js';
+import { parseA2AMessage, isA2AMessage } from './a2a-schema.js';
+
+export { parseA2AMessage, isA2AMessage, A2AMessageSchema } from './a2a-schema.js';
 
 export class A2AProtocol {
   /**
@@ -125,48 +128,51 @@ export class A2AProtocol {
   }
 
   /**
-   * メッセージを検証
+   * メッセージを検証（厳密スキーマ）
    */
-  static validateMessage(message: A2AMessage): { valid: boolean; error?: string } {
-    if (!message.message_id) {
-      return { valid: false, error: 'Missing message_id' };
+  static validateMessage(
+    message: unknown
+  ): { valid: boolean; error?: string; details?: unknown } {
+    const parsed = parseA2AMessage(message);
+    if (!parsed.success) {
+      return { valid: false, error: parsed.error, details: parsed.details };
     }
-    if (!message.timestamp) {
-      return { valid: false, error: 'Missing timestamp' };
-    }
-    if (!message.from) {
-      return { valid: false, error: 'Missing from' };
-    }
-    if (!message.to) {
-      return { valid: false, error: 'Missing to' };
-    }
-    if (!message.type) {
-      return { valid: false, error: 'Missing type' };
-    }
-
-    // レスポンスメッセージの検証
-    if (message.type === 'task_result' || message.type === 'error') {
-      const response = message as A2AResponse;
-      if (!response.in_reply_to) {
-        return { valid: false, error: 'Missing in_reply_to for response message' };
-      }
-    }
-
     return { valid: true };
+  }
+
+  /**
+   * 型ガード
+   */
+  static isMessage(data: unknown): data is A2AMessage {
+    return isA2AMessage(data);
   }
 
   /**
    * メッセージをシリアライズ
    */
   static serialize(message: A2AMessage): string {
-    return JSON.stringify(message, null, 2);
+    const validation = this.validateMessage(message);
+    if (!validation.valid) {
+      throw new Error(`Cannot serialize invalid A2A message: ${validation.error}`);
+    }
+    return JSON.stringify(message);
   }
 
   /**
-   * メッセージをデシリアライズ
+   * メッセージをデシリアライズし、スキーマ検証する
    */
   static deserialize(data: string): A2AMessage {
-    return JSON.parse(data) as A2AMessage;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(data);
+    } catch {
+      throw new Error('Invalid JSON for A2A message');
+    }
+    const parsed = parseA2AMessage(raw);
+    if (!parsed.success) {
+      throw new Error(`Invalid A2A message: ${parsed.error}`);
+    }
+    return parsed.data as A2AMessage;
   }
 }
 
