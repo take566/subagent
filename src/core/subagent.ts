@@ -81,11 +81,20 @@ export abstract class Subagent extends EventEmitter {
    * バリデーション + タイムアウト付きでタスクを実行する入口 (F-1 / H-1)
    */
   async run(task: Task): Promise<TaskResult> {
+    this.logger.setContext({
+      task_id: task.id,
+      correlation_id: task.metadata?.correlation_id,
+    });
+
     try {
       validateTaskAgainstInterface(task, this.config);
     } catch (error) {
       if (error instanceof ValidationError) {
-        this.logger.error('Task validation failed', { details: error.details });
+        this.logger.error('Task validation failed', {
+          task_id: task.id,
+          status: 'failed',
+          details: error.details,
+        });
         return {
           taskId: typeof task?.id === 'string' ? task.id : 'unknown',
           status: 'failed',
@@ -101,7 +110,11 @@ export abstract class Subagent extends EventEmitter {
 
     const timeoutMs = this.config.behavior.timeout;
     if (!timeoutMs) {
-      return this.execute(task);
+      try {
+        return await this.execute(task);
+      } finally {
+        this.logger.clearContext();
+      }
     }
 
     const controller = new AbortController();
@@ -122,7 +135,11 @@ export abstract class Subagent extends EventEmitter {
       return result;
     } catch (error) {
       if (error instanceof TimeoutError) {
-        this.logger.error(error.message);
+        this.logger.error(error.message, {
+          task_id: task.id,
+          status: 'failed',
+          duration_ms: timeoutMs,
+        });
         this.updateStatus('failed');
         return {
           taskId: task.id,
@@ -138,6 +155,7 @@ export abstract class Subagent extends EventEmitter {
     } finally {
       clearTimeout(timer);
       this.abortSignal = null;
+      this.logger.clearContext();
     }
   }
 

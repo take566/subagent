@@ -275,7 +275,15 @@ export class Orchestrator extends EventEmitter {
    */
   private async executeTask(task: Task): Promise<TaskResult> {
     this.activeTasks.set(task.id, task);
-    this.logger.info(`Executing task: ${task.id}`, { action: task.action });
+    this.logger.setContext({
+      task_id: task.id,
+      correlation_id: task.metadata?.correlation_id,
+    });
+    this.logger.info(`Executing task: ${task.id}`, {
+      action: task.action,
+      task_id: task.id,
+      correlation_id: task.metadata?.correlation_id,
+    });
 
     try {
       // 適切なSubagentを選択
@@ -288,27 +296,66 @@ export class Orchestrator extends EventEmitter {
       const result = await subagent.run(task);
 
       this.activeTasks.delete(task.id);
+      this.logger.info(`Task completed: ${task.id}`, {
+        task_id: task.id,
+        status: result.status,
+        duration_ms: result.metrics?.duration_ms,
+      });
       return result;
     } catch (error) {
       this.activeTasks.delete(task.id);
+      this.logger.error(`Task failed: ${task.id}`, {
+        task_id: task.id,
+        status: 'failed',
+        error,
+      });
       throw error;
     }
   }
 
   /**
-   * 適切なSubagentを選択
+   * 適切なSubagentを選択（capability / action ベース）
    */
   private selectSubagent(task: Task): Subagent | undefined {
-    // アクション名に基づいてSubagentを選択
-    const actionToAgentMap: Record<string, string> = {
-      research: 'research-001',
-      codegen: 'codegen-001',
-      review: 'review-001',
-      document: 'document-001',
-    };
+    const action = task.action.toLowerCase();
 
-    const agentId = actionToAgentMap[task.action] || task.action;
-    return this.subagents.get(agentId);
+    // 1. 明示的な agent id 指定
+    const byId = this.subagents.get(task.action) || this.subagents.get(action);
+    if (byId) return byId;
+
+    // 2. capability または name に action が含まれるエージェント
+    for (const subagent of this.subagents.values()) {
+      const config = subagent.getConfig();
+      const capabilities = config.role.capabilities.map((c) => c.toLowerCase());
+      if (
+        capabilities.includes(action) ||
+        config.name.toLowerCase().includes(action) ||
+        config.id.toLowerCase().includes(action)
+      ) {
+        return subagent;
+      }
+    }
+
+    // 3. 従来のエイリアス互換
+    const aliases: Record<string, string[]> = {
+      research: ['research', 'web_search', 'summarization', 'document_analysis'],
+      codegen: ['codegen', 'code_generation', 'refactoring', 'test_generation'],
+      review: ['review', 'code_review', 'code_analysis', 'quality_check', 'validation'],
+      document: ['document', 'documentation', 'document_creation', 'writing', 'formatting'],
+    };
+    const aliasCaps = aliases[action];
+    if (aliasCaps) {
+      for (const subagent of this.subagents.values()) {
+        const caps = subagent.getConfig().role.capabilities.map((c) =>
+          c.toLowerCase()
+        );
+        if (aliasCaps.some((a) => caps.includes(a))) {
+          return subagent;
+        }
+      }
+    }
+
+    return undefined;
   }
 
   /**
