@@ -13,6 +13,7 @@ import type {
 import { Subagent } from '../core/subagent.js';
 import { TaskParser } from './task-parser.js';
 import { Planner } from './planner.js';
+import { evaluateCondition } from './condition-evaluator.js';
 import { ResultAggregator, AggregatedResult } from './result-aggregator.js';
 import { A2AProtocol } from '../protocol/a2a.js';
 import { Logger } from '../utils/logger.js';
@@ -233,45 +234,8 @@ export class Orchestrator extends EventEmitter {
    * 条件を評価
    */
   private evaluateCondition(condition: string, previousResults: TaskResult[]): boolean {
-    // 簡易的な条件評価（実際の実装ではより高度な評価を実装）
-    try {
-      const previous = {
-        success: previousResults.every((r) => r.status === 'completed'),
-        results: previousResults,
-      };
-
-      // シンプルな条件評価（evalの代わりに安全な評価を実装）
-      if (condition.includes('previous.success')) {
-        return previous.success;
-      }
-      if (condition.includes('previous.results.length')) {
-        const match = condition.match(/previous\.results\.length\s*([><=]+)\s*(\d+)/);
-        if (match) {
-          const operator = match[1];
-          const value = parseInt(match[2], 10);
-          switch (operator) {
-            case '>':
-              return previous.results.length > value;
-            case '<':
-              return previous.results.length < value;
-            case '>=':
-              return previous.results.length >= value;
-            case '<=':
-              return previous.results.length <= value;
-            case '===':
-            case '==':
-              return previous.results.length === value;
-            default:
-              return true;
-          }
-        }
-      }
-
-      // デフォルトは実行
-      return true;
-    } catch {
-      return true; // 評価に失敗した場合は実行
-    }
+    // 再帰下降パーサによる安全な評価（不正な式は false）
+    return evaluateCondition(condition, previousResults);
   }
 
   /**
