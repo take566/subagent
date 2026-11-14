@@ -62,3 +62,45 @@ describe('ResultAggregator hierarchical', () => {
     expect(aggregated.children.map((c: any) => c.task_id)).toEqual(['a', 'b']);
   });
 });
+
+describe('ResultAggregator other patterns', () => {
+  const agg = new ResultAggregator();
+
+  it('sequential returns the last result and the chain', () => {
+    const { aggregated, success } = agg.aggregate([r('a', 'A'), r('b', 'B')], 'sequential');
+    expect(success).toBe(true);
+    expect(aggregated.final_result).toBe('B');
+    expect(aggregated.chain.map((c: any) => c.task_id)).toEqual(['a', 'b']);
+  });
+
+  it('parallel merges object results', () => {
+    const { aggregated } = agg.aggregate([r('a', { x: 1 }), r('b', { y: 2 })], 'parallel');
+    expect(aggregated.combined).toEqual({ x: 1, y: 2 });
+    expect(aggregated.results).toHaveLength(2);
+  });
+
+  it('conditional lists the executed tasks', () => {
+    const { aggregated } = agg.aggregate([r('a', 'A')], 'conditional');
+    expect(aggregated.executed).toEqual([{ task_id: 'a', result: 'A', status: 'completed' }]);
+  });
+
+  it('computes metrics including failures', () => {
+    const { success, metrics } = agg.aggregate([
+      { taskId: 'a', status: 'completed', confidence: 0.5, metrics: { duration_ms: 10 } as any },
+      { taskId: 'b', status: 'failed', confidence: 1, metrics: { duration_ms: 5 } as any },
+      { taskId: 'c', status: 'completed' },
+    ]);
+    expect(success).toBe(false);
+    expect(metrics).toEqual({
+      total_duration_ms: 15,
+      success_count: 2,
+      failure_count: 1,
+      avg_confidence: 0.75,
+    });
+  });
+
+  it('hierarchical with no results yields no parent', () => {
+    const { aggregated } = agg.aggregate([], 'hierarchical', new Map());
+    expect(aggregated).toEqual({ parent: undefined, children: [] });
+  });
+});
