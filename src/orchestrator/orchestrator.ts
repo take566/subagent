@@ -84,7 +84,11 @@ export class Orchestrator extends EventEmitter {
       const results = await this.executePlan(plan);
 
       // 4. 結果を集約
-      const aggregated = this.resultAggregator.aggregate(results, plan.pattern);
+      const aggregated = this.resultAggregator.aggregate(
+        results,
+        plan.pattern,
+        plan.dependencies
+      );
       this.logger.info('Execution completed', {
         success: aggregated.success,
         metrics: aggregated.metrics,
