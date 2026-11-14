@@ -27,7 +27,12 @@ class FileCreateTool extends BaseTool {
     const dir = path.dirname(fullPath);
 
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(fullPath, content, 'utf-8');
+    // Buffer (docx/pdf) はエンコードせずそのまま書く
+    if (typeof content === 'string') {
+      await fs.writeFile(fullPath, content, 'utf-8');
+    } else {
+      await fs.writeFile(fullPath, content);
+    }
 
     return {
       path: fullPath,
