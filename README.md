@@ -121,6 +121,13 @@ src/
 └── types/          # 型定義
 ```
 
+## 並行開発
+
+ワークツリー単位の並行開発設計と Issue バックログ:
+
+- [docs/parallel-development-design.md](./docs/parallel-development-design.md)
+- [docs/issues/](./docs/issues/) — 1 ファイル = 1 Issue（`scripts/create-github-issues.sh` で GitHub へ一括作成可）
+
 ## ライセンス
 
 MIT
