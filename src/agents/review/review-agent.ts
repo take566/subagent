@@ -7,6 +7,7 @@ import type { Task, TaskResult, SubagentConfig, Tool } from '../../types/index.j
 import { BaseTool } from '../../core/tool.js';
 import { RetryManager } from '../../utils/retry.js';
 import { ErrorHandler } from '../../utils/error-handler.js';
+import { parseLintOutput } from './lint-parsers.js';
 import * as fs from 'fs/promises';
 
 /**
@@ -68,14 +69,7 @@ class LintTool extends BaseTool {
   }
 
   private parseLintOutput(output: string): any[] {
-    // 実際の実装では、lint出力をパース
-    const lines = output.split('\n');
-    return lines
-      .filter((line) => line.includes('error') || line.includes('warning'))
-      .map((line) => ({
-        type: line.includes('error') ? 'error' : 'warning',
-        message: line,
-      }));
+    return parseLintOutput(output);
   }
 }
 
