@@ -25,7 +25,7 @@ const ACTION_TO_CAPABILITY: Record<string, string> = {
   document: 'document_creation',
 };
 
-export class Orchestratorextends EventEmitter {
+export class Orchestrator extends EventEmitter {
   private subagents: Map<string, Subagent>;
   private taskParser: TaskParser;
   private planner: Planner;
