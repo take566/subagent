@@ -82,7 +82,7 @@ function toParagraphBlocks(content: string): any[] {
 /**
  * Notionページ作成ツール
  */
-class NotionPageCreateTool extends BaseTool {
+export class NotionPageCreateTool extends BaseTool {
   constructor() {
     super('notion_page_create', 'Notionページを作成', {
       parent_page_id: { type: 'string', required: true },
@@ -96,12 +96,18 @@ class NotionPageCreateTool extends BaseTool {
     if (!parent_page_id || !title) {
       throw new Error('parent_page_id and title are required');
     }
-    // 作成時は最初の 100 ブロックまで (Notion の children 上限)
+    // 作成時の children は 100 ブロックまで。残りは追記する
+    const blocks = toParagraphBlocks(content);
     const page = await notionRequest('POST', '/pages', {
       parent: { page_id: parent_page_id },
       properties: { title: { title: [{ type: 'text', text: { content: title } }] } },
-      children: toParagraphBlocks(content).slice(0, 100),
+      children: blocks.slice(0, 100),
     });
+    for (let i = 100; i < blocks.length; i += 100) {
+      await notionRequest('PATCH', `/blocks/${encodeURIComponent(page.id)}/children`, {
+        children: blocks.slice(i, i + 100),
+      });
+    }
     return { page_id: page.id, url: page.url, created: true };
   }
 }
@@ -109,7 +115,7 @@ class NotionPageCreateTool extends BaseTool {
 /**
  * Notionページ更新ツール（タイトル変更と本文ブロックの追記）
  */
-class NotionPageUpdateTool extends BaseTool {
+export class NotionPageUpdateTool extends BaseTool {
   constructor() {
     super('notion_page_update', 'Notionページを更新（タイトル変更・本文追記）', {
       page_id: { type: 'string', required: true },
