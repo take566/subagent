@@ -17,7 +17,15 @@ import { ResultAggregator, AggregatedResult } from './result-aggregator.js';
 import { A2AProtocol } from '../protocol/a2a.js';
 import { Logger } from '../utils/logger.js';
 
-export class Orchestrator extends EventEmitter {
+/** action 名から必要な capability へのマッピング */
+const ACTION_TO_CAPABILITY: Record<string, string> = {
+  research: 'web_search',
+  codegen: 'code_generation',
+  review: 'code_analysis',
+  document: 'document_creation',
+};
+
+export class Orchestratorextends EventEmitter {
   private subagents: Map<string, Subagent>;
   private taskParser: TaskParser;
   private planner: Planner;
@@ -280,9 +288,6 @@ export class Orchestrator extends EventEmitter {
     try {
       // 適切なSubagentを選択
       const subagent = this.selectSubagent(task);
-      if (!subagent) {
-        throw new Error(`No suitable subagent found for action: ${task.action}`);
-      }
 
       // タスクを実行
       const result = await subagent.execute(task);
@@ -298,17 +303,19 @@ export class Orchestrator extends EventEmitter {
   /**
    * 適切なSubagentを選択
    */
-  private selectSubagent(task: Task): Subagent | undefined {
-    // アクション名に基づいてSubagentを選択
-    const actionToAgentMap: Record<string, string> = {
-      research: 'research-001',
-      codegen: 'codegen-001',
-      review: 'review-001',
-      document: 'document-001',
-    };
+  private selectSubagent(task: Task): Subagent {
+    // action → capability に変換(未知の action は capability 名そのものとして扱う)
+    const capability = ACTION_TO_CAPABILITY[task.action] ?? task.action;
 
-    const agentId = actionToAgentMap[task.action] || task.action;
-    return this.subagents.get(agentId);
+    for (const subagent of this.subagents.values()) {
+      if (subagent.getConfig().role.capabilities.includes(capability)) {
+        return subagent;
+      }
+    }
+
+    throw new Error(
+      `No subagent registered with capability "${capability}" for action: ${task.action}`
+    );
   }
 
   /**
