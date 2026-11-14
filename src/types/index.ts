@@ -42,6 +42,8 @@ export interface TaskResult {
   error?: ErrorInfo;
   confidence?: number;
   metrics?: TaskMetrics;
+  /** orchestrator / human へのエスカレーション要求 */
+  escalate?: boolean;
 }
 
 export interface ErrorInfo {

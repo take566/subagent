@@ -14,6 +14,7 @@ import type {
 } from '../types/index.js';
 import { ToolRegistry } from './tool.js';
 import { Logger } from '../utils/logger.js';
+import type { ErrorHandler } from '../utils/error-handler.js';
 
 export abstract class Subagent extends EventEmitter {
   protected id: string;
@@ -23,6 +24,8 @@ export abstract class Subagent extends EventEmitter {
   protected state: SubagentState;
   protected config: SubagentConfig;
   protected logger: Logger;
+  private errorHandler?: ErrorHandler;
+  private escalationConditions: string[] = [];
 
   constructor(config: SubagentConfig, tools: Tool[] = []) {
     super();
@@ -79,8 +82,56 @@ export abstract class Subagent extends EventEmitter {
       return result;
     } catch (error) {
       this.logger.error(`Tool ${name} failed`, { error });
-      throw error;
+      const alternative = await this.findAlternativeTool(name, error);
+      if (!alternative) {
+        throw error;
+      }
+      // 代替ツールは 1 回だけ試す。失敗したら元のエラーを投げる
+      try {
+        const result = await alternative.invoke(params);
+        this.logger.debug(`Alternative tool ${alternative.name} completed`, { result });
+        return result;
+      } catch (altError) {
+        this.logger.error(`Alternative tool ${alternative.name} failed`, { error: altError });
+        throw error;
+      }
     }
+  }
+
+  /**
+   * ErrorHandler を設定（未設定なら従来どおりの挙動）
+   */
+  setErrorHandler(handler: ErrorHandler, escalationConditions: string[] = []): void {
+    this.errorHandler = handler;
+    this.escalationConditions = escalationConditions;
+  }
+
+  /**
+   * 結果にエスカレーション要求フラグを付ける（execute の戻り値に通す）
+   */
+  protected applyEscalation(result: TaskResult): TaskResult {
+    if (
+      this.errorHandler &&
+      this.escalationConditions.length > 0 &&
+      this.errorHandler.shouldEscalate(result, this.escalationConditions)
+    ) {
+      return { ...result, escalate: true };
+    }
+    return result;
+  }
+
+  /**
+   * 代替ツールを探す（許可済み・登録済みのものだけ）
+   */
+  private async findAlternativeTool(name: string, error: unknown): Promise<Tool | undefined> {
+    if (!this.errorHandler) return undefined;
+    const err = error instanceof Error ? error : new Error(String(error));
+    const decision = await this.errorHandler.handleToolFailure(name, err);
+    const altName = decision.alternativeTool;
+    if (!decision.useAlternative || !altName || altName === name) return undefined;
+    const alt = this.tools.get(altName);
+    if (!alt || !this.config.tools.includes(altName)) return undefined;
+    return alt;
   }
 
   /**
