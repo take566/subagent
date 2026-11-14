@@ -37,6 +37,113 @@ class FileCreateTool extends BaseTool {
   }
 }
 
+const NOTION_API = 'https://api.notion.com/v1';
+const NOTION_VERSION = '2022-06-28';
+
+/**
+ * Notion API 呼び出し。トークンは環境変数 NOTION_TOKEN から呼び出し時に読む。
+ */
+async function notionRequest(method: string, endpoint: string, body: unknown): Promise<any> {
+  const token = process.env.NOTION_TOKEN;
+  if (!token) {
+    throw new Error('NOTION_TOKEN environment variable is not set');
+  }
+  const res = await fetch(`${NOTION_API}${endpoint}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Notion-Version': NOTION_VERSION,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`Notion API error: ${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
+/** テキストを Notion の paragraph ブロック列に変換 (rich_text は 2000 文字制限) */
+function toParagraphBlocks(content: string): any[] {
+  const blocks: any[] = [];
+  for (const line of content.split('\n')) {
+    if (line.trim() === '') continue;
+    for (let i = 0; i < line.length; i += 2000) {
+      blocks.push({
+        object: 'block',
+        type: 'paragraph',
+        paragraph: { rich_text: [{ type: 'text', text: { content: line.slice(i, i + 2000) } }] },
+      });
+    }
+  }
+  return blocks;
+}
+
+/**
+ * Notionページ作成ツール
+ */
+class NotionPageCreateTool extends BaseTool {
+  constructor() {
+    super('notion_page_create', 'Notionページを作成', {
+      parent_page_id: { type: 'string', required: true },
+      title: { type: 'string', required: true },
+      content: { type: 'string', required: false },
+    });
+  }
+
+  async invoke(params: Record<string, any>): Promise<any> {
+    const { parent_page_id, title, content = '' } = params;
+    if (!parent_page_id || !title) {
+      throw new Error('parent_page_id and title are required');
+    }
+    // 作成時は最初の 100 ブロックまで (Notion の children 上限)
+    const page = await notionRequest('POST', '/pages', {
+      parent: { page_id: parent_page_id },
+      properties: { title: { title: [{ type: 'text', text: { content: title } }] } },
+      children: toParagraphBlocks(content).slice(0, 100),
+    });
+    return { page_id: page.id, url: page.url, created: true };
+  }
+}
+
+/**
+ * Notionページ更新ツール（タイトル変更と本文ブロックの追記）
+ */
+class NotionPageUpdateTool extends BaseTool {
+  constructor() {
+    super('notion_page_update', 'Notionページを更新（タイトル変更・本文追記）', {
+      page_id: { type: 'string', required: true },
+      title: { type: 'string', required: false },
+      content: { type: 'string', required: false },
+    });
+  }
+
+  async invoke(params: Record<string, any>): Promise<any> {
+    const { page_id, title, content } = params;
+    if (!page_id) {
+      throw new Error('page_id is required');
+    }
+    if (!title && !content) {
+      throw new Error('title or content is required');
+    }
+    const id = encodeURIComponent(page_id);
+    if (title) {
+      await notionRequest('PATCH', `/pages/${id}`, {
+        properties: { title: { title: [{ type: 'text', text: { content: title } }] } },
+      });
+    }
+    if (content) {
+      const blocks = toParagraphBlocks(content);
+      for (let i = 0; i < blocks.length; i += 100) {
+        await notionRequest('PATCH', `/blocks/${id}/children`, {
+          children: blocks.slice(i, i + 100),
+        });
+      }
+    }
+    return { page_id, updated: true };
+  }
+}
+
 export class DocumentAgent extends Subagent {
   private retryManager: RetryManager;
   private errorHandler: ErrorHandler;
@@ -70,7 +177,7 @@ export class DocumentAgent extends Subagent {
           },
         ],
       },
-      tools: ['file_create'],
+      tools: ['file_create', 'notion_page_create', 'notion_page_update'],
       behavior: {
         retry_policy: {
           max_attempts: 2,
@@ -83,7 +190,11 @@ export class DocumentAgent extends Subagent {
       ...config,
     };
 
-    const tools: Tool[] = [new FileCreateTool()];
+    const tools: Tool[] = [
+      new FileCreateTool(),
+      new NotionPageCreateTool(),
+      new NotionPageUpdateTool(),
+    ];
 
     super(defaultConfig, tools);
 
