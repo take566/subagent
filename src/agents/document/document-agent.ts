@@ -105,6 +105,7 @@ export class DocumentAgent extends Subagent {
   }
 
   async execute(task: Task): Promise<TaskResult> {
+    this.validateTask(task);
     const startTime = Date.now();
     this.updateStatus('running');
     this.state.currentTask = task;
