@@ -3,6 +3,7 @@
  */
 
 import { EventEmitter } from 'events';
+import { AsyncLocalStorage } from 'async_hooks';
 import type {
   Task,
   TaskResult,
@@ -23,8 +24,12 @@ export abstract class Subagent extends EventEmitter {
   protected state: SubagentState;
   protected config: SubagentConfig;
   protected logger: Logger;
-  /** 実行中タスクの AbortSignal（callTool がツールへ伝播する） */
-  protected abortSignal?: AbortSignal;
+  /**
+   * 実行中タスクの AbortSignal（callTool がツールへ伝播する）。
+   * タスクの実行経路 (async 連鎖) に束縛するため、timeout 後に遅れて動く
+   * execute からの callTool も abort 済みの signal を見続ける。
+   */
+  private signalStore = new AsyncLocalStorage<AbortSignal>();
 
   constructor(config: SubagentConfig, tools: Tool[] = []) {
     super();
@@ -73,8 +78,6 @@ export abstract class Subagent extends EventEmitter {
 
     const startTime = Date.now();
     const controller = new AbortController();
-    const previous = this.abortSignal;
-    this.abortSignal = controller.signal;
     let timer: NodeJS.Timeout | undefined;
 
     const timeoutPromise = new Promise<TaskResult>((resolve) => {
@@ -93,15 +96,12 @@ export abstract class Subagent extends EventEmitter {
     });
 
     try {
-      const executing = this.execute(task);
+      const executing = this.signalStore.run(controller.signal, () => this.execute(task));
       // 中断後に遅れて reject されても unhandled rejection にしない
       executing.catch(() => undefined);
       return await Promise.race([executing, timeoutPromise]);
     } finally {
       clearTimeout(timer);
-      if (this.abortSignal === controller.signal) {
-        this.abortSignal = previous;
-      }
     }
   }
 
@@ -119,7 +119,7 @@ export abstract class Subagent extends EventEmitter {
       throw new Error(`Tool ${name} is not allowed for ${this.name}`);
     }
 
-    const signal = this.abortSignal;
+    const signal = this.signalStore.getStore();
     signal?.throwIfAborted();
 
     this.logger.debug(`Calling tool: ${name}`, { params });
