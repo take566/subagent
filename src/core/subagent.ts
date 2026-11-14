@@ -117,7 +117,7 @@ export abstract class Subagent extends EventEmitter {
       timestamp: new Date().toISOString(),
     };
 
-    this.taskLogger().info(`Progress:${Math.round(progress * 100)}%`, { message });
+    this.taskLogger().info(`Progress: ${Math.round(progress * 100)}%`, { message });
     this.emit('progress', report);
   }
 
