@@ -155,6 +155,16 @@ export abstract class Subagent extends EventEmitter {
   }
 
   /**
+   * agent id を上書きする（MCP の AGENT_ID 環境変数用）
+   */
+  setId(id: string): void {
+    this.id = id;
+    this.config = { ...this.config, id };
+    this.state.id = id;
+    this.logger = new Logger(id);
+  }
+
+  /**
    * 設定を取得
    */
   getConfig(): SubagentConfig {
