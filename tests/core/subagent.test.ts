@@ -54,3 +54,23 @@ describe('Subagent + ErrorHandler', () => {
     expect(a.finalize({ taskId: 't', status: 'completed', confidence: 0.9 }).escalate).toBeUndefined();
   });
 });
+
+describe('execute wiring', () => {
+  class LowConfAgent extends Subagent {
+    async execute(_task: Task): Promise<TaskResult> {
+      return { taskId: 't', status: 'completed', confidence: 0.1 };
+    }
+  }
+  const task = { id: 't' } as unknown as Task;
+
+  it('flags escalate on the result returned by execute()', async () => {
+    const a = new LowConfAgent(config);
+    a.setErrorHandler(handler(), ['confidence < 0.5']);
+    expect((await a.execute(task)).escalate).toBe(true);
+  });
+
+  it('does not flag without an ErrorHandler', async () => {
+    const a = new LowConfAgent(config);
+    expect((await a.execute(task)).escalate).toBeUndefined();
+  });
+});

@@ -39,6 +39,11 @@ export abstract class Subagent extends EventEmitter {
     // ツールを登録
     tools.forEach((tool) => this.tools.register(tool));
 
+    // サブクラスの execute の戻り値を applyEscalation に通す（全 agent 共通の配線）
+    const originalExecute = this.execute.bind(this);
+    this.execute = async (task: Task): Promise<TaskResult> =>
+      this.applyEscalation(await originalExecute(task));
+
     // 状態を初期化
     this.state = {
       id: this.id,

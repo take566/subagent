@@ -175,6 +175,7 @@ export class CodeGenAgent extends Subagent {
       },
       this.logger
     );
+    this.setErrorHandler(this.errorHandler, ['critical_error']);
   }
 
   async execute(task: Task): Promise<TaskResult> {
