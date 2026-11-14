@@ -104,7 +104,7 @@ export class MCPServer {
             parameters: (args.parameters as Record<string, any>) || {},
           };
 
-          const result = await this.subagent.execute(task);
+          const result = await this.subagent.executeWithTimeout(task);
           return {
             content: [
               {
