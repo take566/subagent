@@ -3,6 +3,7 @@
  */
 
 import { EventEmitter } from 'events';
+import { AsyncLocalStorage } from 'async_hooks';
 import type {
   Task,
   TaskResult,
@@ -23,6 +24,12 @@ export abstract class Subagent extends EventEmitter {
   protected state: SubagentState;
   protected config: SubagentConfig;
   protected logger: Logger;
+  /**
+   * 実行中タスクの AbortSignal（callTool がツールへ伝播する）。
+   * タスクの実行経路 (async 連鎖) に束縛するため、timeout 後に遅れて動く
+   * execute からの callTool も abort 済みの signal を見続ける。
+   */
+  private signalStore = new AsyncLocalStorage<AbortSignal>();
 
   constructor(config: SubagentConfig, tools: Tool[] = []) {
     super();
@@ -59,6 +66,46 @@ export abstract class Subagent extends EventEmitter {
   abstract execute(task: Task): Promise<TaskResult>;
 
   /**
+   * behavior.timeout を強制してタスクを実行する。
+   * 超過時は AbortSignal を abort し、status=failed (code=TIMEOUT) を返す。
+   * execute 側が遅れて完了しても結果は破棄する。
+   */
+  async executeWithTimeout(task: Task): Promise<TaskResult> {
+    const timeout = this.config.behavior?.timeout;
+    if (!timeout || timeout <= 0) {
+      return this.execute(task);
+    }
+
+    const startTime = Date.now();
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout | undefined;
+
+    const timeoutPromise = new Promise<TaskResult>((resolve) => {
+      timer = setTimeout(() => {
+        const message = `Task ${task.id} timed out after ${timeout}ms`;
+        controller.abort(new Error(message));
+        this.logger.warn(message);
+        this.updateStatus('idle');
+        resolve({
+          taskId: task.id,
+          status: 'failed',
+          error: { code: 'TIMEOUT', message },
+          metrics: { duration_ms: Date.now() - startTime },
+        });
+      }, timeout);
+    });
+
+    try {
+      const executing = this.signalStore.run(controller.signal, () => this.execute(task));
+      // 中断後に遅れて reject されても unhandled rejection にしない
+      executing.catch(() => undefined);
+      return await Promise.race([executing, timeoutPromise]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * 実行中タスクの task_id / correlation_id を載せたロガー
    */
   protected taskLogger(): Logger {
@@ -85,14 +132,17 @@ export abstract class Subagent extends EventEmitter {
     }
 
     const log = this.taskLogger();
+    const signal = this.signalStore.getStore();
+    signal?.throwIfAborted();
     const startedAt = Date.now();
     log.debug(`Calling tool: ${name}`, { params });
     try {
-      const result = await tool.invoke(params);
+      const result = await tool.invoke(params, signal);
       log.debug(`Tool ${name} completed`, { result }, {
         status: 'completed',
         duration: Date.now() - startedAt,
       });
+
       return result;
     } catch (error) {
       log.error(`Tool ${name} failed`, { error }, {
