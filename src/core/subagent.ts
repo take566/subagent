@@ -106,6 +106,18 @@ export abstract class Subagent extends EventEmitter {
   }
 
   /**
+   * 実行中タスクの task_id / correlation_id を載せたロガー
+   */
+  protected taskLogger(): Logger {
+    const task = this.state.currentTask;
+    if (!task) return this.logger;
+    return this.logger.child({
+      task_id: task.id,
+      correlation_id: task.metadata?.correlation_id,
+    });
+  }
+
+  /**
    * ツールを呼び出し
    */
   protected async callTool(name: string, params: Record<string, any>): Promise<any> {
@@ -119,16 +131,24 @@ export abstract class Subagent extends EventEmitter {
       throw new Error(`Tool ${name} is not allowed for ${this.name}`);
     }
 
+    const log = this.taskLogger();
     const signal = this.signalStore.getStore();
     signal?.throwIfAborted();
-
-    this.logger.debug(`Calling tool: ${name}`, { params });
+    const startedAt = Date.now();
+    log.debug(`Calling tool: ${name}`, { params });
     try {
       const result = await tool.invoke(params, signal);
-      this.logger.debug(`Tool ${name} completed`, { result });
+      log.debug(`Tool ${name} completed`, { result }, {
+        status: 'completed',
+        duration: Date.now() - startedAt,
+      });
+
       return result;
     } catch (error) {
-      this.logger.error(`Tool ${name} failed`, { error });
+      log.error(`Tool ${name} failed`, { error }, {
+        status: 'failed',
+        duration: Date.now() - startedAt,
+      });
       throw error;
     }
   }
@@ -147,7 +167,7 @@ export abstract class Subagent extends EventEmitter {
       timestamp: new Date().toISOString(),
     };
 
-    this.logger.info(`Progress: ${Math.round(progress * 100)}%`, { message });
+    this.taskLogger().info(`Progress: ${Math.round(progress * 100)}%`, { message });
     this.emit('progress', report);
   }
 
@@ -202,6 +222,16 @@ export abstract class Subagent extends EventEmitter {
    */
   getState(): SubagentState {
     return { ...this.state };
+  }
+
+  /**
+   * agent id を上書きする（MCP の AGENT_ID 環境変数用）
+   */
+  setId(id: string): void {
+    this.id = id;
+    this.config = { ...this.config, id };
+    this.state.id = id;
+    this.logger = new Logger(id);
   }
 
   /**

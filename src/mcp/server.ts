@@ -17,8 +17,19 @@ export class MCPServer {
   private subagent: Subagent;
   private logger: Logger;
 
-  constructor(subagent: Subagent) {
+  private maxConcurrent: number;
+  private active = 0;
+  private waiters: Array<() => void> = [];
+
+  constructor(subagent: Subagent, env: NodeJS.ProcessEnv = process.env) {
     this.subagent = subagent;
+    const agentId = env.AGENT_ID?.trim();
+    if (agentId) {
+      subagent.setId(agentId);
+    }
+    const max = Number.parseInt(env.MAX_CONCURRENT ?? '', 10);
+    // 未設定・不正値は無制限
+    this.maxConcurrent = Number.isInteger(max) && max > 0 ? max : Infinity;
     this.logger = new Logger(`mcp-${subagent.getConfig().id}`);
     this.server = new Server(
       {
@@ -95,6 +106,7 @@ export class MCPServer {
         };
       }
 
+      await this.acquire();
       try {
         if (name === 'execute') {
           // タスクを実行
@@ -136,8 +148,29 @@ export class MCPServer {
           ],
           isError: true,
         };
+      } finally {
+        this.release();
       }
     });
+  }
+
+  /** 同時実行の枠を取得（上限なら待機） */
+  private async acquire(): Promise<void> {
+    if (this.active < this.maxConcurrent) {
+      this.active++;
+      return;
+    }
+    // release 側が枠を引き継ぐので active は増減しない
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
+  }
+
+  private release(): void {
+    const next = this.waiters.shift();
+    if (next) {
+      next();
+    } else {
+      this.active--;
+    }
   }
 
   /**

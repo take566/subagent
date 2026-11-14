@@ -279,7 +279,12 @@ export class Orchestrator extends EventEmitter {
    */
   private async executeTask(task: Task): Promise<TaskResult> {
     this.activeTasks.set(task.id, task);
-    this.logger.info(`Executing task: ${task.id}`, { action: task.action });
+    const log = this.logger.child({
+      task_id: task.id,
+      correlation_id: task.metadata?.correlation_id,
+    });
+    const startedAt = Date.now();
+    log.info(`Executing task: ${task.id}`, { action: task.action }, { status: 'started' });
 
     try {
       // 適切なSubagentを選択
@@ -292,9 +297,17 @@ export class Orchestrator extends EventEmitter {
       const result = await subagent.executeWithTimeout(task);
 
       this.activeTasks.delete(task.id);
+      log.info(`Task finished: ${task.id}`, undefined, {
+        status: result.status,
+        duration: Date.now() - startedAt,
+      });
       return result;
     } catch (error) {
       this.activeTasks.delete(task.id);
+      log.error(`Task failed: ${task.id}`, { error }, {
+        status: 'failed',
+        duration: Date.now() - startedAt,
+      });
       throw error;
     }
   }
