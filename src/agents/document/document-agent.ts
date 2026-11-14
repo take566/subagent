@@ -22,7 +22,7 @@ class FileCreateTool extends BaseTool {
   }
 
   async invoke(params: Record<string, any>): Promise<any> {
-    const { path: filePath, content } = params;
+    const { path: filePath, content } = params as { path: string; content: string | Buffer };
     const fullPath = path.resolve(filePath);
     const dir = path.dirname(fullPath);
 
@@ -174,8 +174,12 @@ export class DocumentAgent extends Subagent {
   /**
    * コンテンツをフォーマット
    */
-  private async formatContent(content: string, format: string): Promise<string> {
+  private async formatContent(content: string, format: string): Promise<string | Buffer> {
     switch (format.toLowerCase()) {
+      case 'docx':
+        return this.formatAsDocx(content);
+      case 'pdf':
+        return this.formatAsPdf(content);
       case 'markdown':
       case 'md':
         return this.formatAsMarkdown(content);
@@ -206,11 +210,64 @@ export class DocumentAgent extends Subagent {
   }
 
   /**
+   * DOCX形式に変換（見出し `#` と段落のみ対応）
+   * 依存は実行時に遅延読み込みする（docx 出力を使わない場合に不要にするため）
+   */
+  private async formatAsDocx(content: string): Promise<Buffer> {
+    const moduleName = 'docx';
+    const { Document, Packer, Paragraph, HeadingLevel } = await import(moduleName);
+    const levels = [
+      HeadingLevel.HEADING_1,
+      HeadingLevel.HEADING_2,
+      HeadingLevel.HEADING_3,
+      HeadingLevel.HEADING_4,
+      HeadingLevel.HEADING_5,
+      HeadingLevel.HEADING_6,
+    ];
+    const children = content.split(/\r?\n/).map((line) => {
+      const m = /^(#{1,6})\s+(.*)$/.exec(line);
+      return m
+        ? new Paragraph({ text: m[2], heading: levels[m[1].length - 1] })
+        : new Paragraph({ text: line });
+    });
+    const doc = new Document({ sections: [{ children }] });
+    return Buffer.from(await Packer.toBuffer(doc));
+  }
+
+  /**
+   * PDF形式に変換（見出しの `#` 記号を除いて本文を出力）
+   * 注意: PDFKit 標準フォントは日本語等の非ラテン文字を描画できない
+   */
+  private async formatAsPdf(content: string): Promise<Buffer> {
+    const moduleName = 'pdfkit';
+    const PDFDocument = (await import(moduleName)).default;
+    const doc = new PDFDocument();
+    const chunks: Buffer[] = [];
+    const done = new Promise<Buffer>((resolve, reject) => {
+      doc.on('data', (c: Buffer) => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+    });
+    for (const line of content.split(/\r?\n/)) {
+      const m = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (m) {
+        doc.fontSize(20 - m[1].length * 2).text(m[2]);
+      } else {
+        doc.fontSize(11).text(line);
+      }
+    }
+    doc.end();
+    return done;
+  }
+
+  /**
    * ファイルパスを生成
    */
   private generateFilePath(format: string): string {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const extension = format === 'markdown' ? 'md' : format === 'html' ? 'html' : 'txt';
+    const f = format.toLowerCase();
+    const extension =
+      f === 'docx' ? 'docx' : f === 'pdf' ? 'pdf' : f === 'markdown' || f === 'md' ? 'md' : f === 'html' ? 'html' : 'txt';
     return `docs/generated-${timestamp}.${extension}`;
   }
 }
