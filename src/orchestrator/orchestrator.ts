@@ -16,6 +16,7 @@ import { Planner } from './planner.js';
 import { ResultAggregator, AggregatedResult } from './result-aggregator.js';
 import { A2AProtocol } from '../protocol/a2a.js';
 import { Logger } from '../utils/logger.js';
+import { validateTask } from '../types/validation.js';
 
 export class Orchestrator extends EventEmitter {
   private subagents: Map<string, Subagent>;
@@ -274,6 +275,7 @@ export class Orchestrator extends EventEmitter {
    * 単一タスクを実行
    */
   private async executeTask(task: Task): Promise<TaskResult> {
+    validateTask(task);
     this.activeTasks.set(task.id, task);
     this.logger.info(`Executing task: ${task.id}`, { action: task.action });
 

@@ -14,6 +14,7 @@ import type {
 } from '../types/index.js';
 import { ToolRegistry } from './tool.js';
 import { Logger } from '../utils/logger.js';
+import { validateSubagentConfig, validateTask } from '../types/validation.js';
 
 export abstract class Subagent extends EventEmitter {
   protected id: string;
@@ -26,6 +27,7 @@ export abstract class Subagent extends EventEmitter {
 
   constructor(config: SubagentConfig, tools: Tool[] = []) {
     super();
+    validateSubagentConfig(config);
     this.id = config.id;
     this.name = config.name;
     this.version = config.version;
@@ -57,6 +59,13 @@ export abstract class Subagent extends EventEmitter {
    * タスクを実行（抽象メソッド）
    */
   abstract execute(task: Task): Promise<TaskResult>;
+
+  /**
+   * タスク入力を検証（execute の入口で呼ぶ。不正なら ValidationError）
+   */
+  protected validateTask(task: Task): void {
+    validateTask(task, this.config);
+  }
 
   /**
    * ツールを呼び出し
