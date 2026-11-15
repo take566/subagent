@@ -104,6 +104,19 @@ node dist/mcp/review-server.js
 node dist/mcp/document-server.js
 ```
 
+### Document Agent の Notion 連携
+
+Document Agent は次のツールを提供します。
+
+- `notion_page_create`: 親ページ配下に新規作成 (`parent_page_id`, `title`, `content`)
+- `notion_page_update`: 既存ページのタイトル変更・本文追記 (`page_id`, `title`, `content`)
+
+利用には環境変数 `NOTION_TOKEN` に Notion integration のトークンを設定します。未設定の場合ツールはエラーを返します。対象ページは integration に共有してください。
+
+```bash
+NOTION_TOKEN=... node dist/mcp/document-server.js
+```
+
 ## プロジェクト構造
 
 ```
