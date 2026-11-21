@@ -12,6 +12,28 @@ import { Subagent } from '../core/subagent.js';
 import type { Task } from '../types/index.js';
 import { Logger } from '../utils/logger.js';
 
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === 'string' && v.length > 0;
+}
+
+/**
+ * execute ツールの引数検証。問題があればエラー文字列、なければ undefined
+ */
+function validateExecuteArgs(args: Record<string, unknown>): string | undefined {
+  if (!isNonEmptyString(args.action)) return 'Invalid arguments: action must be a non-empty string';
+  if (args.task_id !== undefined && !isNonEmptyString(args.task_id)) {
+    return 'Invalid arguments: task_id must be a non-empty string';
+  }
+  if (args.parameters !== undefined && !isObject(args.parameters)) {
+    return 'Invalid arguments: parameters must be an object';
+  }
+  return undefined;
+}
+
 export class MCPServer {
   private server: Server;
   private subagent: Subagent;
@@ -104,6 +126,21 @@ export class MCPServer {
           ],
           isError: true,
         };
+      }
+
+      if (name === 'execute') {
+        const argsError = validateExecuteArgs(args);
+        if (argsError) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error: ${argsError}`,
+              },
+            ],
+            isError: true,
+          };
+        }
       }
 
       await this.acquire();
