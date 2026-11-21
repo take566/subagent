@@ -53,6 +53,6 @@ export abstract class BaseTool implements Tool {
     public parameters: Record<string, any>
   ) {}
 
-  abstract invoke(params: Record<string, any>): Promise<any>;
+  abstract invoke(params: Record<string, any>, signal?: AbortSignal): Promise<any>;
 }
 

@@ -120,7 +120,7 @@ export interface Tool {
   name: string;
   description: string;
   parameters: Record<string, any>;
-  invoke(params: Record<string, any>): Promise<any>;
+  invoke(params: Record<string, any>, signal?: AbortSignal): Promise<any>;
 }
 
 export interface SubagentConfig {

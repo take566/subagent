@@ -299,7 +299,7 @@ export class Orchestrator extends EventEmitter {
       const subagent = this.selectSubagent(task);
 
       // タスクを実行
-      const result = await subagent.execute(task);
+      const result = await subagent.executeWithTimeout(task);
 
       this.activeTasks.delete(task.id);
       log.info(`Task finished: ${task.id}`, undefined, {
