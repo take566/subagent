@@ -77,8 +77,9 @@ class BashTool extends BaseTool {
 
 /**
  * 文字列置換ツール
+ * search はリテラル文字列として扱い、replace 内の `$` も置換パターンとして解釈しない。
  */
-class StrReplaceTool extends BaseTool {
+export class StrReplaceTool extends BaseTool {
   constructor() {
     super('str_replace', '文字列を置換', {
       file: { type: 'string', required: true },
@@ -90,13 +91,20 @@ class StrReplaceTool extends BaseTool {
   async invoke(params: Record<string, any>): Promise<any> {
     const { file, search, replace } = params;
     const content = await fs.readFile(file, 'utf-8');
-    const newContent = content.replace(new RegExp(search, 'g'), replace);
-    await fs.writeFile(file, newContent, 'utf-8');
+    // split/join でリテラル置換する (RegExp にすると `.` `(` `[` や replace の `$1` `$&` が解釈される)
+    const parts = search === '' ? [content] : content.split(search);
+    const occurrences = parts.length - 1;
+
+    if (occurrences === 0) {
+      return { file, replaced: false, occurrences: 0 };
+    }
+
+    await fs.writeFile(file, parts.join(replace), 'utf-8');
 
     return {
       file,
       replaced: true,
-      occurrences: (content.match(new RegExp(search, 'g')) || []).length,
+      occurrences,
     };
   }
 }
