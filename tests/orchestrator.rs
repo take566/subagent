@@ -160,7 +160,7 @@ async fn hierarchical_parent_first() {
         .unwrap();
     assert_eq!(r.results[0].task_id, "root");
     assert!(r.aggregated["parent"]["summary"].is_string());
-    // TS #36: plan.dependencies を集約に渡すので親の task_id が返る
+    // TS #36: hierarchical の集約は親の task_id も返す（dependencies が無くても先頭を親として返る）
     assert_eq!(r.aggregated["parent_task_id"], "root");
     assert_eq!(r.aggregated["children"].as_array().unwrap().len(), 2);
 }
@@ -583,7 +583,9 @@ async fn select_subagent_ignores_agent_id() {
 }
 
 #[tokio::test]
-async fn hierarchical_execute_nests_by_plan_dependencies() {
+/// planner は依存の深さ 1（子 → 親）しか作らず、execute_hierarchical は親を先頭に積むので、
+/// execute() 経由ではネストは起きない（TS も同じ）。ここでは parent_task_id と子の並びだけを見る。
+async fn hierarchical_execute_reports_parent_task_id() {
     let mut o = Orchestrator::new();
     o.register_subagent(Arc::new(probe::Probe::new("echo", false)));
     let r = o

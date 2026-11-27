@@ -345,7 +345,9 @@ impl Orchestrator {
     }
 }
 
-/// action 名から必要な capability へ（TS の `ACTION_TO_CAPABILITY`）
+/// action 名から必要な capability へ（TS の `ACTION_TO_CAPABILITY`）。
+/// TS はオブジェクトを引くので `constructor` などプロトタイプ上の名前で関数が返る癖があるが、
+/// Rust は意図して合わせず、未知の action はすべて capability 名そのものとして扱う。
 fn action_to_capability(action: &str) -> &str {
     match action {
         "research" => "web_search",

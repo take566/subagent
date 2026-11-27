@@ -152,6 +152,11 @@ impl ResultAggregator {
     /// - 親: `dependencies` があれば依存を持たない最初の結果、無ければ先頭の結果。
     /// - 子: 結果に含まれる最初の依存先（自分自身は除く）の下にネストする。
     ///   依存先が不明・不在のもの、循環して親へ辿り着けないものは親直下に置く。
+    ///
+    /// TS の端の癖には意図して合わせていない:
+    /// - 空文字の task_id: TS は falsy として親探索の鎖を打ち切るが、Rust は普通の id として扱う
+    /// - task_id の重複: TS はノードを id で上書きして同じノードを 2 回積むが、Rust は別ノードにする
+    /// - dependencies のキー重複: TS の Map では起きない。Rust は最初のエントリを使う
     fn aggregate_hierarchical(
         results: &[TaskResult],
         dependencies: Option<&[(String, Vec<String>)]>,
@@ -471,5 +476,24 @@ mod tests {
     #[test]
     fn hierarchical_empty_results() {
         assert_eq!(hier(vec![], None), json!({"children": []}));
+    }
+
+    #[test]
+    fn hierarchical_skips_self_dependency_and_uses_next() {
+        // 自分自身への依存は飛ばし、次の依存先 c の下にネストする
+        let d = deps(&[("b", &["b", "c"]), ("c", &["p"])]);
+        let a = hier(vec![ok("p", "P"), ok("c", "C"), ok("b", "B")], Some(&d));
+        assert_eq!(child_ids(&a), vec!["c"]);
+        assert_eq!(a["children"][0]["children"][0]["task_id"], json!("b"));
+    }
+
+    #[test]
+    fn hierarchical_empty_dependency_list_still_counts_as_child() {
+        // TS の dependencies.has と同じく、キーがあれば依存が空でも子扱い
+        let d = deps(&[("p2", &[])]);
+        let a = hier(vec![ok("p2", "P2"), ok("p", "P")], Some(&d));
+        assert_eq!(a["parent_task_id"], json!("p"));
+        assert_eq!(a["parent"], json!("P"));
+        assert_eq!(child_ids(&a), vec!["p2"]);
     }
 }
