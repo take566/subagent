@@ -125,7 +125,20 @@ cargo build --release
 
 ### Review エージェントの lint
 
-`source_code`（文字列）は必須で、`/` で始まるか絶対パスならファイルとして読み込みます。`lint_command` パラメータを指定したときだけ lint を実行します（例: `{"source_code": "...", "lint_command": "cargo clippy"}`）。出力のうち `error` / `warning` を含む行が指摘になります。
+`source_code`（文字列）は必須で、`/` で始まるか絶対パスならファイルとして読み込みます。`lint_command` パラメータを指定したときだけ lint を実行します（例: `{"source_code": "...", "lint_command": "cargo clippy"}`）。出力は形式から言語を推定して解釈します。ESLint（stylish）・tsc・flake8 / ruff の行は `file` / `line` / `column` / `rule` / `tool` / `language` 付きの指摘になり、どれにも当たらない場合は `error` / `warning` を含む行が指摘になります（`tool: "generic"`）。
+
+### Document Agent の Notion 連携
+
+Document Agent は次のツールを提供します。
+
+- `notion_page_create`: 親ページ配下に新規作成 (`parent_page_id`, `title`, `content`)
+- `notion_page_update`: 既存ページのタイトル変更・本文追記 (`page_id`, `title`, `content`)
+
+利用には環境変数 `NOTION_TOKEN` に Notion integration のトークンを設定します。未設定の場合ツールはエラーを返します。対象ページは integration に共有してください。
+
+```bash
+NOTION_TOKEN=... ./target/release/document-server
+```
 
 ## ログ
 
@@ -141,7 +154,7 @@ src/
 ├── core/            # Subagent トレイト・共通状態・ツールレジストリ
 ├── orchestrator/    # Orchestrator・Task Parser・Planner・Result Aggregator
 ├── protocol.rs      # A2A プロトコル
-├── tools.rs         # 組み込みツール
+├── tools/           # 組み込みツール（lint_parsers: lint 出力パーサ、notion: Notion API）
 ├── mcp.rs           # MCP サーバー
 ├── types.rs         # 型定義
 ├── error.rs         # エラー型

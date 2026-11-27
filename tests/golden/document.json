@@ -22,6 +22,48 @@
       }
     },
     {
+      "name": "notion_page_create",
+      "description": "Notionページを作成",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "parent_page_id": {
+            "type": "string",
+            "required": true
+          },
+          "title": {
+            "type": "string",
+            "required": true
+          },
+          "content": {
+            "type": "string",
+            "required": false
+          }
+        }
+      }
+    },
+    {
+      "name": "notion_page_update",
+      "description": "Notionページを更新（タイトル変更・本文追記）",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "page_id": {
+            "type": "string",
+            "required": true
+          },
+          "title": {
+            "type": "string",
+            "required": false
+          },
+          "content": {
+            "type": "string",
+            "required": false
+          }
+        }
+      }
+    },
+    {
       "name": "execute",
       "description": "タスクを実行",
       "inputSchema": {
