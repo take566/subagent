@@ -4,7 +4,7 @@
 //! initialize → tools/list → tools/call を送って記録したもの。
 //! 実行ごとに変わる値（duration_ms、作業ディレクトリ、タイムスタンプ）は正規化して比較する。
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -47,7 +47,10 @@ impl Client {
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
         loop {
             let mut line = String::new();
-            assert!(self.stdout.read_line(&mut line).unwrap() > 0, "server closed stdout");
+            assert!(
+                self.stdout.read_line(&mut line).unwrap() > 0,
+                "server closed stdout"
+            );
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -83,7 +86,11 @@ fn normalize(v: Value, work: &str) -> Value {
         Value::Object(m) => Value::Object(
             m.into_iter()
                 .map(|(k, x)| {
-                    let x = if k == "duration_ms" { json!("<DURATION>") } else { normalize(x, work) };
+                    let x = if k == "duration_ms" {
+                        json!("<DURATION>")
+                    } else {
+                        normalize(x, work)
+                    };
                     (k, x)
                 })
                 .collect(),
@@ -102,11 +109,18 @@ fn text_value(text: &str, work: &str) -> Value {
 
 fn check_server(agent: &str, bin: &str) {
     let golden: Value = serde_json::from_str(
-        &std::fs::read_to_string(format!("{}/tests/golden/{agent}.json", env!("CARGO_MANIFEST_DIR"))).unwrap(),
+        &std::fs::read_to_string(format!(
+            "{}/tests/golden/{agent}.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap(),
     )
     .unwrap();
     let work_dir = tempfile::tempdir().unwrap();
-    let work = std::path::absolute(work_dir.path()).unwrap().to_string_lossy().into_owned();
+    let work = std::path::absolute(work_dir.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
 
     let mut c = Client::spawn(bin, work_dir.path());
     let init = c.request(
@@ -114,8 +128,14 @@ fn check_server(agent: &str, bin: &str) {
         json!({ "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "golden", "version": "0" } }),
     );
     c.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
-    assert_eq!(init["serverInfo"]["name"], golden["serverInfo"]["name"], "{agent}: serverInfo.name");
-    assert_eq!(init["serverInfo"]["version"], golden["serverInfo"]["version"], "{agent}: serverInfo.version");
+    assert_eq!(
+        init["serverInfo"]["name"], golden["serverInfo"]["name"],
+        "{agent}: serverInfo.name"
+    );
+    assert_eq!(
+        init["serverInfo"]["version"], golden["serverInfo"]["version"],
+        "{agent}: serverInfo.version"
+    );
 
     // tools/list: name / description / inputSchema が TS 版と一致し、順序も同じ
     let list = c.request("tools/list", json!({}));
@@ -127,7 +147,11 @@ fn check_server(agent: &str, bin: &str) {
             .map(|t| json!({ "name": t["name"], "description": t["description"], "inputSchema": t["inputSchema"] }))
             .collect()
     };
-    assert_eq!(pick(&list["tools"]), pick(&golden["tools"]), "{agent}: tools/list");
+    assert_eq!(
+        pick(&list["tools"]),
+        pick(&golden["tools"]),
+        "{agent}: tools/list"
+    );
 
     // tools/call
     for case in golden["calls"].as_array().unwrap() {
@@ -153,7 +177,11 @@ fn check_server(agent: &str, bin: &str) {
     }
 
     // TS 版は console.info のログで stdout を汚していた（golden 記録時 45 行以上）。Rust 版は 0 行。
-    assert!(c.non_json_lines.is_empty(), "{agent}: non-JSON stdout lines: {:?}", c.non_json_lines);
+    assert!(
+        c.non_json_lines.is_empty(),
+        "{agent}: non-JSON stdout lines: {:?}",
+        c.non_json_lines
+    );
 }
 
 #[test]
@@ -186,10 +214,21 @@ fn invalid_inputs_are_tool_errors() {
         json!({ "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } }),
     );
     c.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
-    for args in [json!({ "task_id": "r1", "parameters": {} }), json!({ "parameters": { "source_code": 42 } })] {
-        let r = c.request("tools/call", json!({ "name": "execute", "arguments": args }));
+    for args in [
+        json!({ "task_id": "r1", "parameters": {} }),
+        json!({ "parameters": { "source_code": 42 } }),
+    ] {
+        let r = c.request(
+            "tools/call",
+            json!({ "name": "execute", "arguments": args }),
+        );
         assert_eq!(r["isError"], true, "{r}");
-        assert!(r["content"][0]["text"].as_str().unwrap().starts_with("Error: "));
+        assert!(
+            r["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Error: ")
+        );
     }
     let r = c.request("tools/call", json!({ "name": "execute" }));
     assert_eq!(r["content"][0]["text"], "Error: Missing arguments");

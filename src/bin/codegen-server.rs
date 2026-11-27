@@ -1,7 +1,7 @@
 //! CodeGen Agent MCP Server
 
 use std::sync::Arc;
-use subagent::{mcp, CodeGenAgent};
+use subagent::{CodeGenAgent, mcp};
 
 #[tokio::main]
 async fn main() {

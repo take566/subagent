@@ -1,7 +1,7 @@
 //! Review Agent MCP Server
 
 use std::sync::Arc;
-use subagent::{mcp, ReviewAgent};
+use subagent::{ReviewAgent, mcp};
 
 #[tokio::main]
 async fn main() {

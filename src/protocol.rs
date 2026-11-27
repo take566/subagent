@@ -1,10 +1,10 @@
 //! A2A (Agent-to-Agent) 通信プロトコル実装
 
 use crate::types::{
-    now_iso, A2AMessage, MessageMetadata, MessageType, Priority, TaskMetrics, TaskRequestPayload,
-    TaskResultPayload, TaskStatus,
+    A2AMessage, MessageMetadata, MessageType, Priority, TaskMetrics, TaskRequestPayload,
+    TaskResultPayload, TaskStatus, now_iso,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 pub struct A2AProtocol;
@@ -158,7 +158,10 @@ mod tests {
             context: None,
         };
         let m = A2AProtocol::create_task_request("a", "b", &payload, None, None);
-        assert_eq!(m.metadata.as_ref().unwrap().priority, Some(Priority::Medium));
+        assert_eq!(
+            m.metadata.as_ref().unwrap().priority,
+            Some(Priority::Medium)
+        );
         assert!(A2AProtocol::validate_message(&m).is_ok());
         let s = A2AProtocol::serialize(&m);
         assert!(s.contains("\"type\": \"task_request\""));
@@ -170,7 +173,10 @@ mod tests {
         let mut m = A2AProtocol::create_heartbeat("a", "b");
         assert!(A2AProtocol::validate_message(&m).is_ok());
         m.from.clear();
-        assert_eq!(A2AProtocol::validate_message(&m).unwrap_err(), "Missing from");
+        assert_eq!(
+            A2AProtocol::validate_message(&m).unwrap_err(),
+            "Missing from"
+        );
 
         let mut r = A2AProtocol::create_error_message("a", "b", "x", "C", "m", None);
         assert!(A2AProtocol::validate_message(&r).is_ok());
@@ -180,7 +186,12 @@ mod tests {
             "Missing in_reply_to for response message"
         );
 
-        let raw = A2AProtocol::deserialize(r#"{"message_id":"1","timestamp":"t","from":"a","to":"b"}"#).unwrap();
-        assert_eq!(A2AProtocol::validate_message(&raw).unwrap_err(), "Missing type");
+        let raw =
+            A2AProtocol::deserialize(r#"{"message_id":"1","timestamp":"t","from":"a","to":"b"}"#)
+                .unwrap();
+        assert_eq!(
+            A2AProtocol::validate_message(&raw).unwrap_err(),
+            "Missing type"
+        );
     }
 }

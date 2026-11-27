@@ -4,7 +4,7 @@
 //! （CodeGen / Document エージェントはカレントディレクトリにファイルを出力する）
 
 use serde_json::json;
-use subagent::{create_default_orchestrator, ExecutionPattern, Task, TaskContext};
+use subagent::{ExecutionPattern, Task, TaskContext, create_default_orchestrator};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,13 +21,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None,
         )
         .await?;
-    println!("Research Result: {}", serde_json::to_string_pretty(&research)?);
+    println!(
+        "Research Result: {}",
+        serde_json::to_string_pretty(&research)?
+    );
 
     println!("\n=== 並列実行の例 ===");
     let parallel = orchestrator
         .execute(
             vec![
-                Task::new("task-1", "research", json!({ "query": "Rust best practices" })),
+                Task::new(
+                    "task-1",
+                    "research",
+                    json!({ "query": "Rust best practices" }),
+                ),
                 Task::new(
                     "task-2",
                     "document",
@@ -37,7 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(ExecutionPattern::Parallel),
         )
         .await?;
-    println!("Parallel Result: {}", serde_json::to_string_pretty(&parallel)?);
+    println!(
+        "Parallel Result: {}",
+        serde_json::to_string_pretty(&parallel)?
+    );
 
     println!("\n=== 逐次実行の例 ===");
     let mut codegen = Task::new(
@@ -52,13 +62,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sequential = orchestrator
         .execute(
             vec![
-                Task::new("task-seq-1", "research", json!({ "query": "API design patterns" })),
+                Task::new(
+                    "task-seq-1",
+                    "research",
+                    json!({ "query": "API design patterns" }),
+                ),
                 codegen,
             ],
             Some(ExecutionPattern::Sequential),
         )
         .await?;
-    println!("Sequential Result: {}", serde_json::to_string_pretty(&sequential)?);
+    println!(
+        "Sequential Result: {}",
+        serde_json::to_string_pretty(&sequential)?
+    );
 
     Ok(())
 }

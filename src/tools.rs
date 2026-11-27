@@ -1,11 +1,11 @@
 //! 組み込みツール実装（複数のエージェントで共有）
 
-use crate::core::tool::{param_defs, Tool};
+use crate::core::tool::{Tool, param_defs};
 use crate::error::{Error, Result};
-use crate::types::{js_len, JsonMap};
+use crate::types::{JsonMap, js_len};
 use async_trait::async_trait;
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -130,7 +130,7 @@ pub async fn run_shell(command: &str, cwd: Option<&str>) -> Result<ShellOutput> 
                 stdout: String::new(),
                 stderr: String::new(),
                 error: Some(e.to_string()),
-            })
+            });
         }
     };
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -524,7 +524,10 @@ impl Tool for WebFetchTool {
         if let Some(url) = url {
             out.insert("url".into(), url.clone());
         }
-        out.insert("content".into(), json!(format!("ページの内容: {}", js_display(url))));
+        out.insert(
+            "content".into(),
+            json!(format!("ページの内容: {}", js_display(url))),
+        );
         out.insert("title".into(), json!("ページタイトル"));
         Ok(Value::Object(out))
     }
@@ -577,7 +580,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = Some(dir.path().to_path_buf());
         let r = FileCreateTool::new(base.clone())
-            .invoke(map(json!({"path": "a/b.txt", "content": "foo foo bar 日本"})))
+            .invoke(map(
+                json!({"path": "a/b.txt", "content": "foo foo bar 日本"}),
+            ))
             .await
             .unwrap();
         assert_eq!(r["size"], 14); // UTF-16 単位（JS の length と同じ）
@@ -585,7 +590,9 @@ mod tests {
         assert!(p.exists());
 
         let r = StrReplaceTool::new(base)
-            .invoke(map(json!({"file": "a/b.txt", "search": "fo+", "replace": "X"})))
+            .invoke(map(
+                json!({"file": "a/b.txt", "search": "fo+", "replace": "X"}),
+            ))
             .await
             .unwrap();
         assert_eq!(r["occurrences"], 2);
@@ -601,7 +608,8 @@ mod tests {
 
     #[test]
     fn js_replacement_semantics() {
-        let r = |pat: &str, hay: &str, rep: &str| js_replace_all(&Regex::new(pat).unwrap(), hay, rep);
+        let r =
+            |pat: &str, hay: &str, rep: &str| js_replace_all(&Regex::new(pat).unwrap(), hay, rep);
         // 存在しないグループ参照や名前付き参照は文字どおり残る（JS と同じ）
         assert_eq!(r("foo", "x foo y", "${bar}"), "x ${bar} y");
         assert_eq!(r("foo", "x foo y", "cost: $price"), "x cost: $price y");
@@ -631,7 +639,10 @@ mod tests {
 
     #[tokio::test]
     async fn missing_param_is_error() {
-        let e = FileCreateTool::new(None).invoke(JsonMap::new()).await.unwrap_err();
+        let e = FileCreateTool::new(None)
+            .invoke(JsonMap::new())
+            .await
+            .unwrap_err();
         assert!(matches!(e, Error::InvalidParameter(_)));
     }
 
@@ -649,7 +660,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bad["success"], false);
-        assert!(bad["error"].as_str().unwrap().starts_with("Command failed: exit 3"));
+        assert!(
+            bad["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Command failed: exit 3")
+        );
     }
 
     #[test]

@@ -3,14 +3,14 @@
 use crate::core::subagent::{AgentBase, Subagent};
 use crate::core::tool::Tool;
 use crate::error::Result;
-use crate::tools::{js_display, BashTool, FileCreateTool, StrReplaceTool};
+use crate::tools::{BashTool, FileCreateTool, StrReplaceTool, js_display};
 use crate::types::{
     Backoff, BehaviorConfig, ErrorAction, ErrorHandlingStrategy, InterfaceConfig, JsonMap,
     ParameterDefinition, RetryPolicy, RoleConfig, SubagentConfig, Task, TaskResult,
 };
 use crate::utils::{ErrorHandler, RetryManager};
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -55,7 +55,11 @@ impl CodeGenAgent {
                     ..ParameterDefinition::new("result", "object", true)
                 }],
             },
-            tools: vec!["file_create".into(), "bash_tool".into(), "str_replace".into()],
+            tools: vec![
+                "file_create".into(),
+                "bash_tool".into(),
+                "str_replace".into(),
+            ],
             behavior: BehaviorConfig {
                 retry_policy: Some(RetryPolicy {
                     max_attempts: 3,
@@ -115,7 +119,10 @@ impl CodeGenAgent {
             js_display(specification)
         );
         GeneratedCode {
-            tests: Some(vec![(format!("{file_name}.test.{ext}"), "// Test code\n".into())]),
+            tests: Some(vec![(
+                format!("{file_name}.test.{ext}"),
+                "// Test code\n".into(),
+            )]),
             files: vec![(file_name, code)],
         }
     }

@@ -32,7 +32,11 @@ impl Planner {
     }
 
     /// 実行計画を作成（パターン未指定なら自動判定）
-    pub fn create_plan(&self, tasks: Vec<Task>, pattern: Option<ExecutionPattern>) -> OrchestrationPlan {
+    pub fn create_plan(
+        &self,
+        tasks: Vec<Task>,
+        pattern: Option<ExecutionPattern>,
+    ) -> OrchestrationPlan {
         match pattern.unwrap_or_else(|| self.detect_pattern(&tasks)) {
             ExecutionPattern::Sequential => self.create_sequential_plan(tasks),
             ExecutionPattern::Parallel => OrchestrationPlan {
@@ -134,8 +138,10 @@ impl Planner {
         sorted: &mut Vec<Task>,
     ) {
         if visiting.contains(&task.id) {
-            self.logger
-                .warn(&format!("Circular dependency detected for task {}", task.id), None);
+            self.logger.warn(
+                &format!("Circular dependency detected for task {}", task.id),
+                None,
+            );
             return;
         }
         if visited.contains(&task.id) {
@@ -161,7 +167,9 @@ impl Planner {
         if let Some(cid) = task.correlation_id().filter(|c| !c.is_empty()) {
             let related: Vec<String> = all
                 .iter()
-                .filter(|t| t.correlation_id() == Some(cid) && t.id != task.id && !deps.contains(&t.id))
+                .filter(|t| {
+                    t.correlation_id() == Some(cid) && t.id != task.id && !deps.contains(&t.id)
+                })
                 .map(|t| t.id.clone())
                 .collect();
             deps.extend(related);
@@ -179,7 +187,10 @@ mod tests {
     fn task(id: &str, parent: Option<&str>) -> Task {
         let mut t = Task::new(id, "research", json!({}));
         if let Some(p) = parent {
-            t.context = Some(TaskContext { parent_task: Some(p.into()), ..Default::default() });
+            t.context = Some(TaskContext {
+                parent_task: Some(p.into()),
+                ..Default::default()
+            });
         }
         t
     }
@@ -191,16 +202,28 @@ mod tests {
     #[test]
     fn detect() {
         let p = Planner::new();
-        assert_eq!(p.detect_pattern(&[task("a", None)]), ExecutionPattern::Parallel);
-        assert_eq!(p.detect_pattern(&[task("a", Some("b"))]), ExecutionPattern::Sequential);
+        assert_eq!(
+            p.detect_pattern(&[task("a", None)]),
+            ExecutionPattern::Parallel
+        );
+        assert_eq!(
+            p.detect_pattern(&[task("a", Some("b"))]),
+            ExecutionPattern::Sequential
+        );
         // 空文字の parent_task は falsy
-        assert_eq!(p.detect_pattern(&[task("a", Some(""))]), ExecutionPattern::Parallel);
+        assert_eq!(
+            p.detect_pattern(&[task("a", Some(""))]),
+            ExecutionPattern::Parallel
+        );
         let c = Task::new("c", "x", json!({"condition": "previous.success"}));
         assert_eq!(p.detect_pattern(&[c]), ExecutionPattern::Conditional);
         let c0 = Task::new("c", "x", json!({"condition": 0}));
         assert_eq!(p.detect_pattern(&[c0]), ExecutionPattern::Parallel);
         let mut m = task("m", None);
-        m.metadata = Some(TaskMetadata { correlation_id: Some("x".into()), ..Default::default() });
+        m.metadata = Some(TaskMetadata {
+            correlation_id: Some("x".into()),
+            ..Default::default()
+        });
         assert_eq!(p.detect_pattern(&[m]), ExecutionPattern::Sequential);
     }
 
@@ -228,13 +251,24 @@ mod tests {
     fn hierarchical_and_conditional() {
         let p = Planner::new();
         let plan = p.create_plan(
-            vec![task("root", None), task("c1", Some("root")), task("c2", Some("other"))],
+            vec![
+                task("root", None),
+                task("c1", Some("root")),
+                task("c2", Some("other")),
+            ],
             Some(ExecutionPattern::Hierarchical),
         );
-        assert_eq!(plan.dependencies, Some(vec![("c1".into(), vec!["root".into()])]));
+        assert_eq!(
+            plan.dependencies,
+            Some(vec![("c1".into(), vec!["root".into()])])
+        );
 
         let plan = p.create_plan(
-            vec![Task::new("x", "review", json!({"condition": "previous.success"}))],
+            vec![Task::new(
+                "x",
+                "review",
+                json!({"condition": "previous.success"}),
+            )],
             Some(ExecutionPattern::Conditional),
         );
         assert_eq!(

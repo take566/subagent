@@ -41,7 +41,12 @@ impl ErrorHandler {
     }
 
     /// タイムアウトエラーを処理（TS 版の既定 `max_retries = 3`）
-    pub fn handle_timeout(&self, _error: &Error, retry_count: u32, max_retries: u32) -> TimeoutDecision {
+    pub fn handle_timeout(
+        &self,
+        _error: &Error,
+        retry_count: u32,
+        max_retries: u32,
+    ) -> TimeoutDecision {
         let Some(strategy) = &self.strategies.timeout else {
             return TimeoutDecision {
                 should_retry: false,
@@ -65,7 +70,11 @@ impl ErrorHandler {
     }
 
     /// バリデーションエラーを処理
-    pub fn handle_validation_error(&self, _error: &Error, attempt_count: u32) -> ValidationDecision {
+    pub fn handle_validation_error(
+        &self,
+        _error: &Error,
+        attempt_count: u32,
+    ) -> ValidationDecision {
         let Some(strategy) = &self.strategies.validation_error else {
             return ValidationDecision {
                 action: "fail".into(),
@@ -99,8 +108,10 @@ impl ErrorHandler {
         };
         match alternatives.iter().find(|a| a.primary == tool_name) {
             Some(alt) => {
-                self.logger
-                    .info(&format!("Switching from {tool_name} to {}", alt.backup), None);
+                self.logger.info(
+                    &format!("Switching from {tool_name} to {}", alt.backup),
+                    None,
+                );
                 ToolFailureDecision {
                     use_alternative: true,
                     alternative_tool: Some(alt.backup.clone()),
@@ -111,7 +122,11 @@ impl ErrorHandler {
     }
 
     /// 部分的な失敗を処理
-    pub fn handle_partial_failure(&self, _result: &TaskResult, _error: &Error) -> PartialFailureDecision {
+    pub fn handle_partial_failure(
+        &self,
+        _result: &TaskResult,
+        _error: &Error,
+    ) -> PartialFailureDecision {
         match &self.strategies.partial_failure {
             None => PartialFailureDecision {
                 return_partial: false,
@@ -184,7 +199,11 @@ mod tests {
     #[test]
     fn timeout() {
         let e = Error::other("t");
-        assert!(!handler(Default::default()).handle_timeout(&e, 0, 3).should_retry);
+        assert!(
+            !handler(Default::default())
+                .handle_timeout(&e, 0, 3)
+                .should_retry
+        );
         let h = handler(ErrorHandlingStrategy {
             timeout: Some(ErrorAction {
                 fallback: Some("delegate".into()),
@@ -194,11 +213,17 @@ mod tests {
         });
         assert_eq!(
             h.handle_timeout(&e, 1, 3),
-            TimeoutDecision { should_retry: true, action: "retry_with_backoff".into() }
+            TimeoutDecision {
+                should_retry: true,
+                action: "retry_with_backoff".into()
+            }
         );
         assert_eq!(
             h.handle_timeout(&e, 3, 3),
-            TimeoutDecision { should_retry: false, action: "delegate".into() }
+            TimeoutDecision {
+                should_retry: false,
+                action: "delegate".into()
+            }
         );
     }
 
@@ -222,7 +247,9 @@ mod tests {
         assert!(!h.handle_validation_error(&e, 1).should_escalate);
         assert!(h.handle_validation_error(&e, 2).should_escalate);
         assert_eq!(
-            h.handle_tool_failure("web_search", &e).alternative_tool.as_deref(),
+            h.handle_tool_failure("web_search", &e)
+                .alternative_tool
+                .as_deref(),
             Some("document_parser")
         );
         assert!(!h.handle_tool_failure("web_fetch", &e).use_alternative);
@@ -240,7 +267,10 @@ mod tests {
         });
         assert_eq!(
             h.handle_partial_failure(&result(None, false), &e),
-            PartialFailureDecision { return_partial: true, notify: true }
+            PartialFailureDecision {
+                return_partial: true,
+                notify: true
+            }
         );
     }
 
@@ -251,7 +281,10 @@ mod tests {
         assert!(!h.should_escalate(&result(Some(0.0), false), &["confidence < 0.5"]));
         assert!(!h.should_escalate(&result(None, false), &["confidence < 0.5"]));
         assert!(h.should_escalate(&result(None, true), &["critical_error"]));
-        assert!(!h.should_escalate(&result(None, true), &["requires_approval", "critical_error"]));
+        assert!(!h.should_escalate(
+            &result(None, true),
+            &["requires_approval", "critical_error"]
+        ));
     }
 
     #[test]

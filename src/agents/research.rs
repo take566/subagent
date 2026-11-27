@@ -3,15 +3,15 @@
 use crate::core::subagent::{AgentBase, Subagent};
 use crate::core::tool::Tool;
 use crate::error::Result;
-use crate::tools::{js_display, DocumentParserTool, WebFetchTool, WebSearchTool};
+use crate::tools::{DocumentParserTool, WebFetchTool, WebSearchTool, js_display};
 use crate::types::{
-    js_substring, BehaviorConfig, Backoff, ErrorAction, ErrorHandlingStrategy, InterfaceConfig,
+    Backoff, BehaviorConfig, ErrorAction, ErrorHandlingStrategy, InterfaceConfig,
     ParameterDefinition, RetryPolicy, RoleConfig, SubagentConfig, Task, TaskResult,
-    ToolAlternative,
+    ToolAlternative, js_substring,
 };
 use crate::utils::{ErrorHandler, RetryManager};
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub struct ResearchAgent {
@@ -43,11 +43,17 @@ impl ResearchAgent {
                     ParameterDefinition::new("context", "object", false),
                 ],
                 output: vec![ParameterDefinition {
-                    schema: Some(json!({ "summary": "string", "sources": "array", "confidence": "number" })),
+                    schema: Some(
+                        json!({ "summary": "string", "sources": "array", "confidence": "number" }),
+                    ),
                     ..ParameterDefinition::new("result", "object", true)
                 }],
             },
-            tools: vec!["web_search".into(), "web_fetch".into(), "document_parser".into()],
+            tools: vec![
+                "web_search".into(),
+                "web_fetch".into(),
+                "document_parser".into(),
+            ],
             behavior: BehaviorConfig {
                 retry_policy: Some(RetryPolicy {
                     max_attempts: 3,

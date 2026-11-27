@@ -5,13 +5,13 @@ use crate::core::tool::Tool;
 use crate::error::{Error, Result};
 use crate::tools::{LintTool, ViewTool};
 use crate::types::{
-    js_len, Backoff, BehaviorConfig, ErrorAction, ErrorHandlingStrategy, InterfaceConfig, JsonMap,
-    ParameterDefinition, RetryPolicy, RoleConfig, SubagentConfig, Task, TaskResult,
+    Backoff, BehaviorConfig, ErrorAction, ErrorHandlingStrategy, InterfaceConfig, JsonMap,
+    ParameterDefinition, RetryPolicy, RoleConfig, SubagentConfig, Task, TaskResult, js_len,
 };
 use crate::utils::{ErrorHandler, RetryManager};
 use async_trait::async_trait;
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
@@ -51,7 +51,9 @@ impl ReviewAgent {
                     ParameterDefinition::new("lint_command", "string", false),
                 ],
                 output: vec![ParameterDefinition {
-                    schema: Some(json!({ "issues": "array", "suggestions": "array", "score": "number" })),
+                    schema: Some(
+                        json!({ "issues": "array", "suggestions": "array", "score": "number" }),
+                    ),
                     ..ParameterDefinition::new("result", "object", true)
                 }],
             },
@@ -79,7 +81,8 @@ impl ReviewAgent {
             .clone()
             .or_else(|| Self::default_config().behavior.retry_policy)
             .expect("default retry policy");
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(ViewTool::default()), Arc::new(LintTool::default())];
+        let tools: Vec<Arc<dyn Tool>> =
+            vec![Arc::new(ViewTool::default()), Arc::new(LintTool::default())];
         let base = AgentBase::new(config, tools);
         let retry_manager = RetryManager::new(policy, base.logger.clone());
         let error_handler = ErrorHandler::new(
@@ -123,13 +126,22 @@ impl ReviewAgent {
             suggestions.push("コメントを追加してコードの可読性を向上させてください。".into());
         }
 
-        Analysis { issues, suggestions }
+        Analysis {
+            issues,
+            suggestions,
+        }
     }
 
     /// スコアを計算（0〜100 の整数）
     fn calculate_score(issues: &[Value], analysis: &Analysis) -> i64 {
-        let count = |t: &str| issues.iter().filter(|i| i.get("type") == Some(&json!(t))).count() as i64;
-        let score = 100 - count("error") * 10 - count("warning") * 2 - analysis.suggestions.len() as i64;
+        let count = |t: &str| {
+            issues
+                .iter()
+                .filter(|i| i.get("type") == Some(&json!(t)))
+                .count() as i64
+        };
+        let score =
+            100 - count("error") * 10 - count("warning") * 2 - analysis.suggestions.len() as i64;
         score.clamp(0, 100)
     }
 }
@@ -157,14 +169,19 @@ impl Subagent for ReviewAgent {
             // 1. コードを読み込み
             // TS 版は文字列以外（未指定を含む）で TypeError → failed になる
             let Some(Value::String(source)) = source else {
-                return Err(Error::InvalidParameter("`source_code` (string) is required".into()));
+                return Err(Error::InvalidParameter(
+                    "`source_code` (string) is required".into(),
+                ));
             };
             let code = if Self::is_file_path(source) {
                 let mut p = JsonMap::new();
                 p.insert("path".into(), json!(source));
                 let info = base.call_tool("view", p).await?;
                 tools_called += 1;
-                info.get("content").and_then(Value::as_str).unwrap_or_default().to_string()
+                info.get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
             } else {
                 source.clone()
             };

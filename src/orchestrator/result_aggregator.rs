@@ -1,9 +1,9 @@
 //! Result Aggregator 実装
 
 use crate::error::{Error, Result};
-use crate::types::{is_truthy, ser_js_f64, ExecutionPattern, JsonMap, TaskResult, TaskStatus};
+use crate::types::{ExecutionPattern, JsonMap, TaskResult, TaskStatus, is_truthy, ser_js_f64};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AggregatedMetrics {
@@ -44,8 +44,15 @@ impl ResultAggregator {
     }
 
     /// 結果を集約。sequential で結果が空のときはエラー（TS 版は TypeError）。
-    pub fn aggregate(&self, results: Vec<TaskResult>, pattern: ExecutionPattern) -> Result<AggregatedResult> {
-        let success_count = results.iter().filter(|r| r.status == TaskStatus::Completed).count() as u64;
+    pub fn aggregate(
+        &self,
+        results: Vec<TaskResult>,
+        pattern: ExecutionPattern,
+    ) -> Result<AggregatedResult> {
+        let success_count = results
+            .iter()
+            .filter(|r| r.status == TaskStatus::Completed)
+            .count() as u64;
         let failure_count = results.len() as u64 - success_count;
         let total_duration_ms = results
             .iter()
@@ -108,7 +115,11 @@ impl ResultAggregator {
     /// `Object.assign({}, ...results)` 相当。文字列・配列は添字キーで展開される。
     fn combine_results(results: &[TaskResult]) -> Value {
         let mut combined = JsonMap::new();
-        for v in results.iter().filter_map(|r| r.result.as_ref()).filter(|v| is_truthy(v)) {
+        for v in results
+            .iter()
+            .filter_map(|r| r.result.as_ref())
+            .filter(|v| is_truthy(v))
+        {
             match v {
                 Value::Object(m) => {
                     for (k, x) in m {
@@ -153,14 +164,23 @@ mod tests {
     use super::*;
     use crate::types::TaskMetrics;
 
-    fn r(id: &str, status: TaskStatus, result: Option<Value>, conf: Option<f64>, ms: u64) -> TaskResult {
+    fn r(
+        id: &str,
+        status: TaskStatus,
+        result: Option<Value>,
+        conf: Option<f64>,
+        ms: u64,
+    ) -> TaskResult {
         TaskResult {
             task_id: id.into(),
             status,
             result,
             error: None,
             confidence: conf,
-            metrics: Some(TaskMetrics { duration_ms: ms, ..Default::default() }),
+            metrics: Some(TaskMetrics {
+                duration_ms: ms,
+                ..Default::default()
+            }),
         }
     }
 
@@ -169,8 +189,20 @@ mod tests {
         let a = ResultAggregator::new()
             .aggregate(
                 vec![
-                    r("1", TaskStatus::Completed, Some(json!({"a": 1, "b": 2})), Some(0.5), 10),
-                    r("2", TaskStatus::Failed, Some(json!({"a": 3, "c": 4})), Some(0.0), 5),
+                    r(
+                        "1",
+                        TaskStatus::Completed,
+                        Some(json!({"a": 1, "b": 2})),
+                        Some(0.5),
+                        10,
+                    ),
+                    r(
+                        "2",
+                        TaskStatus::Failed,
+                        Some(json!({"a": 3, "c": 4})),
+                        Some(0.0),
+                        5,
+                    ),
                     r("3", TaskStatus::Completed, Some(json!("hi")), None, 0),
                 ],
                 ExecutionPattern::Parallel,
@@ -190,7 +222,9 @@ mod tests {
 
     #[test]
     fn avg_confidence_zero_serializes_as_integer() {
-        let a = ResultAggregator::new().aggregate(vec![], ExecutionPattern::Parallel).unwrap();
+        let a = ResultAggregator::new()
+            .aggregate(vec![], ExecutionPattern::Parallel)
+            .unwrap();
         assert!(a.success);
         let s = serde_json::to_string(&a.metrics).unwrap();
         assert!(s.contains(r#""avg_confidence":0}"#), "{s}");
@@ -198,7 +232,11 @@ mod tests {
 
     #[test]
     fn sequential_empty_is_error_not_panic() {
-        assert!(ResultAggregator::new().aggregate(vec![], ExecutionPattern::Sequential).is_err());
+        assert!(
+            ResultAggregator::new()
+                .aggregate(vec![], ExecutionPattern::Sequential)
+                .is_err()
+        );
     }
 
     #[test]
@@ -208,11 +246,29 @@ mod tests {
             r("c", TaskStatus::Completed, None, None, 0),
         ];
         let agg = ResultAggregator::new();
-        let s = agg.aggregate(rs.clone(), ExecutionPattern::Sequential).unwrap().aggregated;
-        assert_eq!(s, json!({"chain": [{"task_id": "p", "result": {"x": 1}}, {"task_id": "c"}]}));
-        let h = agg.aggregate(rs.clone(), ExecutionPattern::Hierarchical).unwrap().aggregated;
-        assert_eq!(h, json!({"parent": {"x": 1}, "children": [{"task_id": "c"}]}));
-        let c = agg.aggregate(rs, ExecutionPattern::Conditional).unwrap().aggregated;
-        assert_eq!(c["executed"][1], json!({"task_id": "c", "status": "completed"}));
+        let s = agg
+            .aggregate(rs.clone(), ExecutionPattern::Sequential)
+            .unwrap()
+            .aggregated;
+        assert_eq!(
+            s,
+            json!({"chain": [{"task_id": "p", "result": {"x": 1}}, {"task_id": "c"}]})
+        );
+        let h = agg
+            .aggregate(rs.clone(), ExecutionPattern::Hierarchical)
+            .unwrap()
+            .aggregated;
+        assert_eq!(
+            h,
+            json!({"parent": {"x": 1}, "children": [{"task_id": "c"}]})
+        );
+        let c = agg
+            .aggregate(rs, ExecutionPattern::Conditional)
+            .unwrap()
+            .aggregated;
+        assert_eq!(
+            c["executed"][1],
+            json!({"task_id": "c", "status": "completed"})
+        );
     }
 }

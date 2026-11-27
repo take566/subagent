@@ -1,7 +1,7 @@
 //! Document Agent MCP Server
 
 use std::sync::Arc;
-use subagent::{mcp, DocumentAgent};
+use subagent::{DocumentAgent, mcp};
 
 #[tokio::main]
 async fn main() {

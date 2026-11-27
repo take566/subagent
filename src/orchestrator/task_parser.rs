@@ -1,8 +1,8 @@
 //! Task Parser 実装
 
-use crate::types::{is_truthy, now_iso, JsonMap, Task, TaskContext, TaskMetadata};
+use crate::types::{JsonMap, Task, TaskContext, TaskMetadata, is_truthy, now_iso};
 use rand::RngExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Orchestrator への入力（TS の `string | Task | Task[]`）
 #[derive(Debug, Clone)]
@@ -53,15 +53,20 @@ impl TaskParser {
 
     /// 文字列からタスクを解析。JSON として解釈できなければ単純な `execute` タスクにする。
     fn parse_from_string(&self, input: &str) -> Vec<Task> {
-        let parsed = serde_json::from_str::<Value>(input).ok().and_then(|v| match v {
-            Value::Array(items) => items.into_iter().map(normalize_value).collect(),
-            other => normalize_value(other).map(|t| vec![t]),
-        });
+        let parsed = serde_json::from_str::<Value>(input)
+            .ok()
+            .and_then(|v| match v {
+                Value::Array(items) => items.into_iter().map(normalize_value).collect(),
+                other => normalize_value(other).map(|t| vec![t]),
+            });
         parsed.unwrap_or_else(|| {
             vec![Task {
                 id: generate_task_id(),
                 action: "execute".into(),
-                parameters: json!({ "query": input }).as_object().cloned().unwrap_or_default(),
+                parameters: json!({ "query": input })
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
                 context: None,
                 metadata: None,
             }]
@@ -208,7 +213,9 @@ mod tests {
 
     #[test]
     fn json_object_and_array() {
-        let ts = p().parse(r#"[{"id":"a","action":"research","parameters":{"q":1}},{"action":"x"}]"#.into());
+        let ts = p().parse(
+            r#"[{"id":"a","action":"research","parameters":{"q":1}},{"action":"x"}]"#.into(),
+        );
         assert_eq!(ts.len(), 2);
         assert_eq!(ts[0].id, "a");
         assert_eq!(ts[0].parameters["q"], 1);
@@ -226,7 +233,10 @@ mod tests {
         assert!(t.parameters.is_empty());
         // null は TS で TypeError → catch されて文字列タスクになる
         assert_eq!(p().parse("null".into())[0].parameters["query"], "null");
-        assert_eq!(p().parse("[1,null]".into())[0].parameters["query"], "[1,null]");
+        assert_eq!(
+            p().parse("[1,null]".into())[0].parameters["query"],
+            "[1,null]"
+        );
         // 型の合わない context でも落ちない
         let t = &p().parse(r#"{"context":{"parent_task":5}}"#.into())[0];
         assert_eq!(t.parent_task(), None);
@@ -261,10 +271,19 @@ mod tests {
     fn dependencies() {
         let mut a = Task::new("a", "x", json!({}));
         let mut b = Task::new("b", "x", json!({}));
-        b.context = Some(TaskContext { parent_task: Some("a".into()), ..Default::default() });
-        a.metadata = Some(TaskMetadata { correlation_id: Some("c".into()), ..Default::default() });
+        b.context = Some(TaskContext {
+            parent_task: Some("a".into()),
+            ..Default::default()
+        });
+        a.metadata = Some(TaskMetadata {
+            correlation_id: Some("c".into()),
+            ..Default::default()
+        });
         let mut c = Task::new("c", "x", json!({}));
-        c.metadata = Some(TaskMetadata { correlation_id: Some("c".into()), ..Default::default() });
+        c.metadata = Some(TaskMetadata {
+            correlation_id: Some("c".into()),
+            ..Default::default()
+        });
         let d = p().extract_dependencies(&[a, b, c]);
         assert_eq!(
             d,

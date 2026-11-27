@@ -12,12 +12,12 @@ use crate::core::subagent::{Subagent, SubagentEvent};
 use crate::error::{Error, Result};
 use crate::protocol::A2AProtocol;
 use crate::types::{
-    A2AMessage, ExecutionPattern, MessageType, OrchestrationPlan, Task, TaskMetadata,
-    TaskResult, TaskResultPayload, TaskStatus,
+    A2AMessage, ExecutionPattern, MessageType, OrchestrationPlan, Task, TaskMetadata, TaskResult,
+    TaskResultPayload, TaskStatus,
 };
 use crate::utils::logger::Logger;
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::broadcast;
@@ -93,11 +93,14 @@ impl Orchestrator {
         let outcome: Result<AggregatedResult> = async {
             // 1. 解析
             let tasks = self.task_parser.parse(input.into());
-            self.logger.info(&format!("Parsed {} task(s)", tasks.len()), None);
+            self.logger
+                .info(&format!("Parsed {} task(s)", tasks.len()), None);
             // 2. 計画
             let plan = self.planner.create_plan(tasks, pattern);
-            self.logger
-                .info(&format!("Created plan with pattern: {}", pattern_name(plan.pattern)), None);
+            self.logger.info(
+                &format!("Created plan with pattern: {}", pattern_name(plan.pattern)),
+                None,
+            );
             // 3. 実行
             let pattern = plan.pattern;
             let results = self.execute_plan(plan).await?;
@@ -241,7 +244,8 @@ impl Orchestrator {
     /// A2A メッセージを処理。heartbeat などレスポンス不要のときは None。
     pub async fn handle_a2a_message(&self, message: &A2AMessage) -> Option<A2AMessage> {
         if let Err(e) = A2AProtocol::validate_message(message) {
-            self.logger.error("Invalid A2A message", Some(&json!({ "error": e })));
+            self.logger
+                .error("Invalid A2A message", Some(&json!({ "error": e })));
             return Some(A2AProtocol::create_error_message(
                 "orchestrator",
                 &message.from,
@@ -264,7 +268,13 @@ impl Orchestrator {
                         None,
                     ));
                 };
-                let str_field = |k: &str| payload.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+                let str_field = |k: &str| {
+                    payload
+                        .get(k)
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string()
+                };
                 let task = Task {
                     id: str_field("task_id"),
                     action: str_field("action"),
@@ -277,7 +287,10 @@ impl Orchestrator {
                         .get("context")
                         .and_then(|c| serde_json::from_value(c.clone()).ok()),
                     metadata: Some(TaskMetadata {
-                        correlation_id: message.metadata.as_ref().and_then(|m| m.correlation_id.clone()),
+                        correlation_id: message
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.correlation_id.clone()),
                         priority: message.metadata.as_ref().and_then(|m| m.priority),
                         ..Default::default()
                     }),
@@ -370,10 +383,22 @@ mod tests {
         assert!(evaluate_condition(&json!("previous.success"), &ok));
         assert!(!evaluate_condition(&json!("previous.success"), &bad));
         assert!(evaluate_condition(&json!("previous.success"), &[]));
-        assert!(evaluate_condition(&json!("previous.results.length > 1"), &ok));
-        assert!(!evaluate_condition(&json!("previous.results.length >= 3"), &ok));
-        assert!(evaluate_condition(&json!("previous.results.length === 2"), &ok));
-        assert!(evaluate_condition(&json!("previous.results.length =< 0"), &ok));
+        assert!(evaluate_condition(
+            &json!("previous.results.length > 1"),
+            &ok
+        ));
+        assert!(!evaluate_condition(
+            &json!("previous.results.length >= 3"),
+            &ok
+        ));
+        assert!(evaluate_condition(
+            &json!("previous.results.length === 2"),
+            &ok
+        ));
+        assert!(evaluate_condition(
+            &json!("previous.results.length =< 0"),
+            &ok
+        ));
         assert!(evaluate_condition(&json!("anything else"), &bad));
         assert!(evaluate_condition(&json!(true), &bad));
     }

@@ -7,13 +7,13 @@
 use crate::core::tool::{Tool, ToolRegistry};
 use crate::error::{Error, Result};
 use crate::types::{
-    now_iso, AgentStatus, JsonMap, ProgressReport, SubagentConfig, SubagentContextState,
-    SubagentMetrics, SubagentState, Task, TaskMetrics, TaskResult, TaskStatus,
+    AgentStatus, JsonMap, ProgressReport, SubagentConfig, SubagentContextState, SubagentMetrics,
+    SubagentState, Task, TaskMetrics, TaskResult, TaskStatus, now_iso,
 };
 use crate::utils::error_handler::ErrorHandler;
 use crate::utils::logger::Logger;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
@@ -106,10 +106,13 @@ impl AgentBase {
 
     /// ツールを呼び出し
     pub async fn call_tool(&self, name: &str, params: JsonMap) -> Result<Value> {
-        let tool = self.tools.get(name).ok_or_else(|| Error::ToolNotAvailable {
-            tool: name.into(),
-            agent: self.config.name.clone(),
-        })?;
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or_else(|| Error::ToolNotAvailable {
+                tool: name.into(),
+                agent: self.config.name.clone(),
+            })?;
         if !self.config.tools.iter().any(|t| t == name) {
             return Err(Error::ToolNotAllowed {
                 tool: name.into(),
@@ -242,7 +245,11 @@ impl AgentBase {
         self.set_current_task(Some(task.clone()));
 
         // future が途中で drop された（キャンセルされた）場合に状態を戻す
-        let mut guard = CancelGuard { base: self, task_id: &task.id, armed: true };
+        let mut guard = CancelGuard {
+            base: self,
+            task_id: &task.id,
+            armed: true,
+        };
         let outcome = body().await;
         guard.armed = false;
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -343,7 +350,10 @@ mod tests {
                     capabilities: vec![],
                     constraints: None,
                 },
-                interface: InterfaceConfig { input: vec![], output: vec![] },
+                interface: InterfaceConfig {
+                    input: vec![],
+                    output: vec![],
+                },
                 tools: vec![],
                 behavior: BehaviorConfig::default(),
             },
@@ -358,7 +368,10 @@ mod tests {
             result: None,
             error: None,
             confidence: None,
-            metrics: Some(TaskMetrics { duration_ms: ms, ..Default::default() }),
+            metrics: Some(TaskMetrics {
+                duration_ms: ms,
+                ..Default::default()
+            }),
         }
     }
 
@@ -389,7 +402,10 @@ mod tests {
         b.report_progress("t1", 1.5, "done");
         assert_eq!(
             rx.try_recv().unwrap(),
-            SubagentEvent::StatusChanged { agent_id: "a".into(), status: AgentStatus::Running }
+            SubagentEvent::StatusChanged {
+                agent_id: "a".into(),
+                status: AgentStatus::Running
+            }
         );
         match rx.try_recv().unwrap() {
             SubagentEvent::Progress { report, .. } => {

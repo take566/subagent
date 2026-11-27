@@ -1,7 +1,7 @@
 //! Research Agent MCP Server
 
 use std::sync::Arc;
-use subagent::{mcp, ResearchAgent};
+use subagent::{ResearchAgent, mcp};
 
 #[tokio::main]
 async fn main() {

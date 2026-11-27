@@ -1,6 +1,6 @@
 //! Orchestrator の結合テスト
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use subagent::{
     AgentStatus, CodeGenAgent, DocumentAgent, ExecutionPattern, Orchestrator, ResearchAgent,
@@ -24,7 +24,10 @@ fn orchestrator(dir: &std::path::Path) -> Orchestrator {
 }
 
 fn with_parent(mut t: Task, parent: &str) -> Task {
-    t.context = Some(TaskContext { parent_task: Some(parent.into()), ..Default::default() });
+    t.context = Some(TaskContext {
+        parent_task: Some(parent.into()),
+        ..Default::default()
+    });
     t
 }
 
@@ -34,7 +37,11 @@ async fn single_research_task() {
     let o = orchestrator(dir.path());
     let r = o
         .execute(
-            Task::new("r1", "research", json!({ "query": "CI/CD", "depth": "detailed" })),
+            Task::new(
+                "r1",
+                "research",
+                json!({ "query": "CI/CD", "depth": "detailed" }),
+            ),
             None,
         )
         .await
@@ -43,7 +50,12 @@ async fn single_research_task() {
     assert_eq!(r.results[0].status, TaskStatus::Completed);
     let combined = &r.aggregated["combined"];
     assert_eq!(combined["confidence"], json!(0.5));
-    assert!(combined["summary"].as_str().unwrap().starts_with("「CI/CD」に関する調査結果"));
+    assert!(
+        combined["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("「CI/CD」に関する調査結果")
+    );
 }
 
 #[tokio::test]
@@ -54,7 +66,11 @@ async fn parallel_writes_into_base_dir() {
         .execute(
             vec![
                 Task::new("p1", "research", json!({ "query": "Rust" })),
-                Task::new("p2", "document", json!({ "content": "# T", "format": "markdown" })),
+                Task::new(
+                    "p2",
+                    "document",
+                    json!({ "content": "# T", "format": "markdown" }),
+                ),
                 Task::new("p3", "codegen", json!({ "specification": "util" })),
             ],
             Some(ExecutionPattern::Parallel),
@@ -65,7 +81,10 @@ async fn parallel_writes_into_base_dir() {
     assert_eq!(r.metrics.success_count, 3);
     assert!(dir.path().join("generated.ts").exists());
     assert!(dir.path().join("generated.ts.test.ts").exists());
-    let doc = r.results[1].result.as_ref().unwrap()["document_path"].as_str().unwrap().to_string();
+    let doc = r.results[1].result.as_ref().unwrap()["document_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(doc.ends_with(".md"));
     assert_eq!(std::fs::read_to_string(doc).unwrap(), "# T");
 }
@@ -101,7 +120,10 @@ async fn sequential_passes_previous_results() {
     let r = o
         .execute(
             vec![
-                with_parent(Task::new("s2", "codegen", json!({ "specification": "client" })), "s1"),
+                with_parent(
+                    Task::new("s2", "codegen", json!({ "specification": "client" })),
+                    "s1",
+                ),
                 Task::new("s1", "research", json!({ "query": "API" })),
             ],
             None, // parent_task があるので sequential が自動選択される
@@ -123,8 +145,14 @@ async fn hierarchical_parent_first() {
         .execute(
             vec![
                 Task::new("root", "research", json!({ "query": "x" })),
-                with_parent(Task::new("c1", "codegen", json!({ "specification": "a" })), "root"),
-                with_parent(Task::new("c2", "review", json!({ "source_code": "let a = 1;" })), "root"),
+                with_parent(
+                    Task::new("c1", "codegen", json!({ "specification": "a" })),
+                    "root",
+                ),
+                with_parent(
+                    Task::new("c2", "review", json!({ "source_code": "let a = 1;" })),
+                    "root",
+                ),
             ],
             Some(ExecutionPattern::Hierarchical),
         )
@@ -143,8 +171,16 @@ async fn conditional_skips_false_conditions() {
         .execute(
             vec![
                 Task::new("c1", "research", json!({ "query": "x" })),
-                Task::new("c2", "review", json!({ "source_code": "x", "condition": "previous.results.length > 5" })),
-                Task::new("c3", "review", json!({ "source_code": "x", "condition": "previous.success" })),
+                Task::new(
+                    "c2",
+                    "review",
+                    json!({ "source_code": "x", "condition": "previous.results.length > 5" }),
+                ),
+                Task::new(
+                    "c3",
+                    "review",
+                    json!({ "source_code": "x", "condition": "previous.success" }),
+                ),
             ],
             None, // condition があるので conditional が自動選択される
         )
@@ -159,9 +195,16 @@ async fn conditional_skips_false_conditions() {
 async fn unknown_action_and_empty_sequential_are_errors() {
     let dir = tempfile::tempdir().unwrap();
     let o = orchestrator(dir.path());
-    let e = o.execute(Task::new("u", "nope", json!({})), None).await.unwrap_err();
+    let e = o
+        .execute(Task::new("u", "nope", json!({})), None)
+        .await
+        .unwrap_err();
     assert_eq!(e.to_string(), "No suitable subagent found for action: nope");
-    assert!(o.execute(Vec::<Task>::new(), Some(ExecutionPattern::Sequential)).await.is_err());
+    assert!(
+        o.execute(Vec::<Task>::new(), Some(ExecutionPattern::Sequential))
+            .await
+            .is_err()
+    );
     // 自由記述は execute アクション → 対応 Subagent なし
     assert!(o.execute("調べて", None).await.is_err());
 }
@@ -193,7 +236,12 @@ async fn progress_events_are_forwarded() {
 #[tokio::test]
 async fn failed_task_is_recorded_in_history() {
     let agent = DocumentAgent::new();
-    assert!(agent.execute(Task::new("f", "document", json!({}))).await.is_err());
+    assert!(
+        agent
+            .execute(Task::new("f", "document", json!({})))
+            .await
+            .is_err()
+    );
     let s = agent.get_state();
     assert_eq!(s.status, AgentStatus::Failed);
     assert_eq!(s.context.history.len(), 1);
@@ -257,7 +305,7 @@ async fn a2a_task_request_roundtrip() {
 
 mod probe {
     use async_trait::async_trait;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use subagent::utils::ErrorHandler;
     use subagent::utils::Logger;
     use subagent::{
@@ -277,8 +325,15 @@ mod probe {
                 id: id.into(),
                 name: id.into(),
                 version: "0".into(),
-                role: RoleConfig { description: String::new(), capabilities: vec![], constraints: None },
-                interface: InterfaceConfig { input: vec![], output: vec![] },
+                role: RoleConfig {
+                    description: String::new(),
+                    capabilities: vec![],
+                    constraints: None,
+                },
+                interface: InterfaceConfig {
+                    input: vec![],
+                    output: vec![],
+                },
                 tools: vec![],
                 behavior: BehaviorConfig::default(),
             };
@@ -370,8 +425,15 @@ async fn cancelled_task_resets_agent_state() {
 #[tokio::test]
 async fn review_requires_string_source_code() {
     let agent = ReviewAgent::new();
-    for params in [json!({}), json!({ "source_code": 42 }), json!({ "source_code": null })] {
-        let e = agent.execute(Task::new("r", "review", params)).await.unwrap_err();
+    for params in [
+        json!({}),
+        json!({ "source_code": 42 }),
+        json!({ "source_code": null }),
+    ] {
+        let e = agent
+            .execute(Task::new("r", "review", params))
+            .await
+            .unwrap_err();
         assert!(e.to_string().contains("source_code"), "{e}");
     }
     assert_eq!(agent.get_state().metrics.success_rate, 0.0);
@@ -382,11 +444,23 @@ async fn codegen_and_document_param_types_like_ts() {
     let dir = tempfile::tempdir().unwrap();
     let cg = CodeGenAgent::with_options(CodeGenAgent::default_config(), Some(dir.path().into()));
     // language が null なら TS の既定値は効かず .js になる
-    cg.execute(Task::new("c", "codegen", json!({ "specification": "s", "language": null })))
-        .await
-        .unwrap();
+    cg.execute(Task::new(
+        "c",
+        "codegen",
+        json!({ "specification": "s", "language": null }),
+    ))
+    .await
+    .unwrap();
     assert!(dir.path().join("generated.js").exists());
 
     let doc = DocumentAgent::with_options(DocumentAgent::default_config(), Some(dir.path().into()));
-    assert!(doc.execute(Task::new("d", "document", json!({ "content": "x", "format": null }))).await.is_err());
+    assert!(
+        doc.execute(Task::new(
+            "d",
+            "document",
+            json!({ "content": "x", "format": null })
+        ))
+        .await
+        .is_err()
+    );
 }

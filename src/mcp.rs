@@ -11,7 +11,7 @@ use rmcp::model::{
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub struct McpServer {
@@ -33,7 +33,10 @@ impl McpServer {
             .into_iter()
             .map(|name| {
                 let tool = base.get_tool(&name);
-                let description = tool.as_ref().map(|t| t.description().to_string()).unwrap_or_default();
+                let description = tool
+                    .as_ref()
+                    .map(|t| t.description().to_string())
+                    .unwrap_or_default();
                 let properties = tool.map(|t| t.parameters().clone()).unwrap_or_default();
                 McpTool::new(name, description, object_schema(properties))
             })
@@ -68,7 +71,11 @@ impl McpServer {
                     Some(v @ Value::Number(_)) if crate::types::is_truthy(v) => v.to_string(),
                     _ => format!("task-{}", chrono::Utc::now().timestamp_millis()),
                 },
-                action: args.get("action").and_then(Value::as_str).unwrap_or_default().into(),
+                action: args
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .into(),
                 parameters: args
                     .get("parameters")
                     .and_then(Value::as_object)
