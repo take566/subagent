@@ -11,7 +11,7 @@ use crate::types::{
     SubagentState, Task, TaskMetrics, TaskResult, TaskStatus, now_iso,
 };
 use crate::utils::error_handler::ErrorHandler;
-use crate::utils::logger::Logger;
+use crate::utils::logger::{LogContext, LogFields, Logger};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::future::Future;
@@ -40,6 +40,10 @@ pub struct AgentBase {
     events: broadcast::Sender<SubagentEvent>,
     listeners: Mutex<Vec<broadcast::Sender<SubagentEvent>>>,
     pub logger: Logger,
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -119,26 +123,54 @@ impl AgentBase {
                 agent: self.config.name.clone(),
             });
         }
-        self.logger.debug(
+        let log = self.task_logger();
+        let started = Instant::now();
+        log.debug(
             &format!("Calling tool: {name}"),
             Some(&json!({ "params": params })),
         );
         match tool.invoke(params).await {
             Ok(result) => {
-                self.logger.debug(
+                log.debug_with(
                     &format!("Tool {name} completed"),
                     Some(&json!({ "result": result })),
+                    &LogFields::new("completed", elapsed_ms(started)),
                 );
                 Ok(result)
             }
             Err(e) => {
-                self.logger.error(
+                log.error_with(
                     &format!("Tool {name} failed"),
                     Some(&json!({ "error": e.to_string() })),
+                    &LogFields::new("failed", elapsed_ms(started)),
                 );
                 Err(e)
             }
         }
+    }
+
+    /// 実行中タスクの task_id / correlation_id を載せたロガー（TS の `taskLogger()`）
+    pub fn task_logger(&self) -> Logger {
+        match &lock(&self.state).current_task {
+            Some(task) => self.logger.child(LogContext::task(
+                task.id.clone(),
+                task.metadata
+                    .as_ref()
+                    .and_then(|m| m.correlation_id.clone()),
+            )),
+            None => self.logger.clone(),
+        }
+    }
+
+    /// 指定 task_id のロガー。current_task と同じタスクなら correlation_id も載せる
+    fn logger_for_task(&self, task_id: &str) -> Logger {
+        let correlation_id = lock(&self.state)
+            .current_task
+            .as_ref()
+            .filter(|t| t.id == task_id)
+            .and_then(|t| t.metadata.as_ref())
+            .and_then(|m| m.correlation_id.clone());
+        self.logger.child(LogContext::task(task_id, correlation_id))
     }
 
     /// 進捗を報告。並列実行でも正しいタスクに紐づくよう task_id を明示的に受け取る。
@@ -149,7 +181,7 @@ impl AgentBase {
             message: message.into(),
             timestamp: now_iso(),
         };
-        self.logger.info(
+        self.logger_for_task(task_id).info(
             &format!("Progress: {}%", (progress * 100.0).round() as i64),
             Some(&json!({ "message": message })),
         );
@@ -303,9 +335,10 @@ struct CancelGuard<'a> {
 impl Drop for CancelGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.base.logger.warn(
+            self.base.logger_for_task(self.task_id).warn_with(
                 "Task cancelled before completion",
-                Some(&json!({ "task_id": self.task_id })),
+                None,
+                &LogFields::status("cancelled"),
             );
             self.base.set_current_task(None);
             self.base.update_status(AgentStatus::Idle);
@@ -391,6 +424,119 @@ mod tests {
         let b = base();
         let e = b.call_tool("nope", JsonMap::new()).await.unwrap_err();
         assert_eq!(e.to_string(), "Tool nope not available for A");
+    }
+
+    struct EchoTool {
+        params: JsonMap,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl Tool for EchoTool {
+        fn name(&self) -> &str {
+            if self.fail { "broken" } else { "echo" }
+        }
+        fn description(&self) -> &str {
+            ""
+        }
+        fn parameters(&self) -> &JsonMap {
+            &self.params
+        }
+        async fn invoke(&self, params: JsonMap) -> Result<Value> {
+            if self.fail {
+                Err(Error::other("boom"))
+            } else {
+                Ok(Value::Object(params))
+            }
+        }
+    }
+
+    /// echo / broken ツールを持ち、ログを sink に貯める base
+    fn logging_base() -> (AgentBase, crate::utils::logger::LogSink) {
+        let mut config = base().get_config().clone();
+        config.tools = vec!["echo".into(), "broken".into()];
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(EchoTool {
+                params: JsonMap::new(),
+                fail: false,
+            }),
+            Arc::new(EchoTool {
+                params: JsonMap::new(),
+                fail: true,
+            }),
+        ];
+        let mut b = AgentBase::new(config, tools);
+        let (logger, sink) =
+            Logger::capturing(Some("a".into()), crate::utils::logger::LogLevel::Debug);
+        b.logger = logger;
+        (b, sink)
+    }
+
+    fn task_with_correlation(id: &str, corr: Option<&str>) -> Task {
+        let mut t = Task::new(id, "x", json!({}));
+        t.metadata = Some(crate::types::TaskMetadata {
+            correlation_id: corr.map(str::to_string),
+            ..Default::default()
+        });
+        t
+    }
+
+    fn entries(sink: &crate::utils::logger::LogSink) -> Vec<Value> {
+        sink.lock()
+            .unwrap()
+            .iter()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect()
+    }
+
+    /// TS #44: ツール呼び出しのログに task_id / correlation_id / status / duration が載る
+    #[tokio::test]
+    async fn tool_logs_carry_task_context_status_and_duration() {
+        let (b, sink) = logging_base();
+        b.set_current_task(Some(task_with_correlation("t1", Some("c1"))));
+        b.call_tool("echo", JsonMap::new()).await.unwrap();
+        b.call_tool("broken", JsonMap::new()).await.unwrap_err();
+
+        let es = entries(&sink);
+        assert_eq!(es.len(), 4, "{es:?}");
+        for e in &es {
+            assert_eq!(e["agent_id"], "a");
+            assert_eq!(e["task_id"], "t1");
+            assert_eq!(e["correlation_id"], "c1");
+        }
+        assert_eq!(es[0]["message"], "Calling tool: echo");
+        assert!(es[0].get("status").is_none());
+        assert_eq!(es[1]["message"], "Tool echo completed");
+        assert_eq!(es[1]["status"], "completed");
+        assert!(es[1]["duration"].is_u64());
+        assert_eq!(es[3]["message"], "Tool broken failed");
+        assert_eq!(es[3]["level"], "ERROR");
+        assert_eq!(es[3]["status"], "failed");
+        assert!(es[3]["duration"].is_u64());
+    }
+
+    #[tokio::test]
+    async fn tool_logs_without_current_task_have_no_task_id() {
+        let (b, sink) = logging_base();
+        b.call_tool("echo", JsonMap::new()).await.unwrap();
+        let es = entries(&sink);
+        assert!(es.iter().all(|e| e.get("task_id").is_none()), "{es:?}");
+        assert_eq!(es[1]["status"], "completed");
+    }
+
+    #[test]
+    fn progress_log_carries_task_context() {
+        let (b, sink) = logging_base();
+        b.set_current_task(Some(task_with_correlation("t1", Some("c1"))));
+        b.report_progress("t1", 0.5, "half");
+        // 並列実行で current_task と違う task の進捗なら correlation_id は付けない
+        b.report_progress("t2", 0.5, "other");
+        let es = entries(&sink);
+        assert_eq!(es[0]["task_id"], "t1");
+        assert_eq!(es[0]["correlation_id"], "c1");
+        assert_eq!(es[0]["message"], "Progress: 50%");
+        assert_eq!(es[1]["task_id"], "t2");
+        assert!(es[1].get("correlation_id").is_none());
     }
 
     #[test]

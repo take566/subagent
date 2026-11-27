@@ -19,12 +19,19 @@ struct Client {
 
 impl Client {
     fn spawn(bin: &str, cwd: &Path) -> Client {
+        Self::spawn_with(bin, cwd, &[], Stdio::null())
+    }
+
+    fn spawn_with(bin: &str, cwd: &Path, envs: &[(&str, &str)], stderr: Stdio) -> Client {
         let mut child = Command::new(bin)
             .current_dir(cwd)
             .env("SUBAGENT_LOG_LEVEL", "debug") // ログが stdout を汚さないことも確かめる
+            .env_remove("AGENT_ID")
+            .env_remove("MAX_CONCURRENT")
+            .envs(envs.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()
             .expect("spawn server");
         Client {
@@ -214,29 +221,82 @@ fn invalid_inputs_are_tool_errors() {
         json!({ "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } }),
     );
     c.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
-    for args in [
-        json!({ "task_id": "r1", "parameters": {} }),
-        json!({ "parameters": { "source_code": 42 } }),
+    // TS #54: execute の引数は agent に渡す前に検証する
+    for (args, expected) in [
+        (
+            json!({ "task_id": "r1", "parameters": {} }),
+            "Error: Invalid arguments: action must be a non-empty string",
+        ),
+        (
+            json!({ "parameters": { "source_code": 42 } }),
+            "Error: Invalid arguments: action must be a non-empty string",
+        ),
+        // 以前は数値の task_id を文字列化して通していた
+        (
+            json!({ "task_id": 7, "action": "review", "parameters": { "source_code": "x" } }),
+            "Error: Invalid arguments: task_id must be a non-empty string",
+        ),
+        (
+            json!({ "action": "review", "parameters": "x" }),
+            "Error: Invalid arguments: parameters must be an object",
+        ),
     ] {
         let r = c.request(
             "tools/call",
             json!({ "name": "execute", "arguments": args }),
         );
         assert_eq!(r["isError"], true, "{r}");
-        assert!(
-            r["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .starts_with("Error: ")
-        );
+        assert_eq!(r["content"][0]["text"], expected, "{args}");
     }
-    let r = c.request("tools/call", json!({ "name": "execute" }));
-    assert_eq!(r["content"][0]["text"], "Error: Missing arguments");
-    // 数値の task_id はそのまま（文字列化して）使う
+    // 引数が正しくても agent 側で失敗すれば isError（検証のエラーではない）
     let r = c.request(
         "tools/call",
-        json!({ "name": "execute", "arguments": { "task_id": 7, "parameters": { "source_code": "x" } } }),
+        json!({ "name": "execute", "arguments": { "action": "review", "parameters": { "source_code": 42 } } }),
     );
-    let v: Value = serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(v["taskId"], "7");
+    assert_eq!(r["isError"], true, "{r}");
+    let text = r["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Error: ") && !text.contains("Invalid arguments"),
+        "{text}"
+    );
+    let r = c.request("tools/call", json!({ "name": "execute" }));
+    assert_eq!(r["content"][0]["text"], "Error: Missing arguments");
+}
+
+/// TS #40: AGENT_ID は agent の id（MCP ログの agent_id）に反映され、MAX_CONCURRENT を付けても動く
+#[test]
+fn agent_id_env_is_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("stderr.log");
+    {
+        let log = std::fs::File::create(&log_path).unwrap();
+        let mut c = Client::spawn_with(
+            env!("CARGO_BIN_EXE_research-server"),
+            dir.path(),
+            &[("AGENT_ID", " research-xyz "), ("MAX_CONCURRENT", "1")],
+            Stdio::from(log),
+        );
+        c.request(
+            "initialize",
+            json!({ "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } }),
+        );
+        c.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+        let r = c.request(
+            "tools/call",
+            json!({ "name": "execute", "arguments": { "task_id": "e1", "action": "research", "parameters": { "query": "q" } } }),
+        );
+        assert!(r.get("isError").is_none_or(|v| v == false), "{r}");
+        assert!(c.non_json_lines.is_empty(), "{:?}", c.non_json_lines);
+    } // drop で子プロセスを止める
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log.contains("\"agent_id\": \"mcp-research-xyz\""),
+        "MCP logger id: {log}"
+    );
+    assert!(
+        log.contains("\"agent_id\": \"research-xyz\""),
+        "agent logger id: {log}"
+    );
+    // タスク中のツールログには task_id が載る（TS #44）
+    assert!(log.contains("\"task_id\": \"e1\""), "task_id: {log}");
 }
