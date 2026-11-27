@@ -13,6 +13,9 @@ pub enum Error {
     #[error("No suitable subagent found for action: {0}")]
     NoSubagent(String),
 
+    #[error("No subagent registered with capability \"{capability}\" for action: {action}")]
+    NoCapableSubagent { capability: String, action: String },
+
     #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
 
@@ -42,7 +45,7 @@ impl Error {
         match self {
             Error::ToolNotAvailable { .. } => "ToolNotAvailable",
             Error::ToolNotAllowed { .. } => "ToolNotAllowed",
-            Error::NoSubagent(_) => "NoSubagent",
+            Error::NoSubagent(_) | Error::NoCapableSubagent { .. } => "NoSubagent",
             Error::InvalidParameter(_) => "InvalidParameter",
             Error::Io(_) | Error::IoPath { .. } => "IoError",
             Error::Regex(_) => "RegexError",

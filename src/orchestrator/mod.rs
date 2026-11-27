@@ -26,7 +26,8 @@ static LENGTH_COND_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"previous\.results\.length\s*([><=]+)\s*(\d+)").unwrap());
 
 pub struct Orchestrator {
-    subagents: HashMap<String, Arc<dyn Subagent>>,
+    /// 登録順を保つ（TS の Map と同じく、capability での選択は先に登録したものを優先する）
+    subagents: Vec<(String, Arc<dyn Subagent>)>,
     task_parser: TaskParser,
     planner: Planner,
     result_aggregator: ResultAggregator,
@@ -44,7 +45,7 @@ impl Default for Orchestrator {
 impl Orchestrator {
     pub fn new() -> Self {
         Orchestrator {
-            subagents: HashMap::new(),
+            subagents: Vec::new(),
             task_parser: TaskParser::new(),
             planner: Planner::new(),
             result_aggregator: ResultAggregator::new(),
@@ -62,7 +63,11 @@ impl Orchestrator {
             Some(&json!({ "id": config.id })),
         );
         subagent.base().add_listener(self.events.clone());
-        self.subagents.insert(config.id.clone(), subagent);
+        // 同じ id の再登録は位置を保ったまま置き換える（Map.set と同じ）
+        match self.subagents.iter_mut().find(|(id, _)| *id == config.id) {
+            Some(slot) => slot.1 = subagent,
+            None => self.subagents.push((config.id.clone(), subagent)),
+        }
     }
 
     /// 登録済み Subagent のイベント（progress / status_changed）を購読
@@ -71,7 +76,10 @@ impl Orchestrator {
     }
 
     pub fn get_subagent(&self, id: &str) -> Option<Arc<dyn Subagent>> {
-        self.subagents.get(id).cloned()
+        self.subagents
+            .iter()
+            .find(|(k, _)| k == id)
+            .map(|(_, a)| a.clone())
     }
 
     /// 実行中のタスク ID
@@ -103,9 +111,12 @@ impl Orchestrator {
             );
             // 3. 実行
             let pattern = plan.pattern;
+            let dependencies = plan.dependencies.clone();
             let results = self.execute_plan(plan).await?;
-            // 4. 集約
-            let aggregated = self.result_aggregator.aggregate(results, pattern)?;
+            // 4. 集約（hierarchical は dependencies で親子を分ける）
+            let aggregated =
+                self.result_aggregator
+                    .aggregate(results, pattern, dependencies.as_deref())?;
             self.logger.info(
                 "Execution completed",
                 Some(&json!({ "success": aggregated.success, "metrics": aggregated.metrics })),
@@ -219,8 +230,8 @@ impl Orchestrator {
             .unwrap_or_else(|e| e.into_inner())
             .insert(id.clone(), task.clone());
         let result = match self.select_subagent(&task) {
-            Some(agent) => agent.execute(task).await,
-            None => Err(Error::NoSubagent(task.action.clone())),
+            Ok(agent) => agent.execute(task).await,
+            Err(e) => Err(e),
         };
         self.active_tasks
             .lock()
@@ -229,16 +240,25 @@ impl Orchestrator {
         result
     }
 
-    /// アクション名から Subagent を選ぶ（未知のアクションは Subagent ID とみなす）
-    fn select_subagent(&self, task: &Task) -> Option<Arc<dyn Subagent>> {
-        let id = match task.action.as_str() {
-            "research" => "research-001",
-            "codegen" => "codegen-001",
-            "review" => "review-001",
-            "document" => "document-001",
-            other => other,
-        };
-        self.subagents.get(id).cloned()
+    /// action を capability に変換し、その capability を持つ最初の Subagent を選ぶ（TS #37）。
+    /// 未知の action は capability 名そのものとして扱う。
+    fn select_subagent(&self, task: &Task) -> Result<Arc<dyn Subagent>> {
+        let capability = action_to_capability(&task.action);
+        self.subagents
+            .iter()
+            .map(|(_, a)| a)
+            .find(|a| {
+                a.get_config()
+                    .role
+                    .capabilities
+                    .iter()
+                    .any(|c| c == capability)
+            })
+            .cloned()
+            .ok_or_else(|| Error::NoCapableSubagent {
+                capability: capability.to_string(),
+                action: task.action.clone(),
+            })
     }
 
     /// A2A メッセージを処理。heartbeat などレスポンス不要のときは None。
@@ -322,6 +342,17 @@ impl Orchestrator {
             // heartbeat にはレスポンス不要
             _ => None,
         }
+    }
+}
+
+/// action 名から必要な capability へ（TS の `ACTION_TO_CAPABILITY`）
+fn action_to_capability(action: &str) -> &str {
+    match action {
+        "research" => "web_search",
+        "codegen" => "code_generation",
+        "review" => "code_analysis",
+        "document" => "document_creation",
+        other => other,
     }
 }
 
