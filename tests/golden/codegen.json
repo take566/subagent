@@ -1,0 +1,107 @@
+{
+  "serverInfo": {
+    "name": "CodeGenAgent",
+    "version": "1.0.0"
+  },
+  "tools": [
+    {
+      "name": "file_create",
+      "description": "ファイルを作成",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "required": true
+          },
+          "content": {
+            "type": "string",
+            "required": true
+          }
+        }
+      }
+    },
+    {
+      "name": "bash_tool",
+      "description": "Bashコマンドを実行",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "required": true
+          },
+          "cwd": {
+            "type": "string",
+            "required": false
+          }
+        }
+      }
+    },
+    {
+      "name": "str_replace",
+      "description": "文字列を置換",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string",
+            "required": true
+          },
+          "search": {
+            "type": "string",
+            "required": true
+          },
+          "replace": {
+            "type": "string",
+            "required": true
+          }
+        }
+      }
+    },
+    {
+      "name": "execute",
+      "description": "タスクを実行",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "description": "タスクID"
+          },
+          "action": {
+            "type": "string",
+            "description": "アクション名"
+          },
+          "parameters": {
+            "type": "object",
+            "description": "パラメータ"
+          }
+        }
+      }
+    }
+  ],
+  "calls": [
+    {
+      "call": {
+        "name": "execute",
+        "arguments": {
+          "task_id": "g-2",
+          "action": "codegen",
+          "parameters": {
+            "specification": "Make a util"
+          }
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"taskId\": \"g-2\",\n  \"status\": \"completed\",\n  \"result\": {\n    \"files\": [\n      {\n        \"path\": \"<WORK>/generated.ts\",\n        \"created\": true,\n        \"size\": 88\n      }\n    ],\n    \"test_files\": [\n      {\n        \"path\": \"<WORK>/generated.ts.test.ts\",\n        \"created\": true,\n        \"size\": 13\n      }\n    ]\n  },\n  \"confidence\": 0.85,\n  \"metrics\": {\n    \"duration_ms\": \"<DURATION>\",\n    \"tools_called\": 2\n  }\n}"
+          }
+        ]
+      }
+    }
+  ],
+  "stdout_non_json_lines": 45
+}

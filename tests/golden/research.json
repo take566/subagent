@@ -1,0 +1,165 @@
+{
+  "serverInfo": {
+    "name": "ResearchAgent",
+    "version": "1.0.0"
+  },
+  "tools": [
+    {
+      "name": "web_search",
+      "description": "Web検索を実行",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "required": true
+          },
+          "max_results": {
+            "type": "number",
+            "required": false
+          }
+        }
+      }
+    },
+    {
+      "name": "web_fetch",
+      "description": "Webページの内容を取得",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "required": true
+          }
+        }
+      }
+    },
+    {
+      "name": "document_parser",
+      "description": "ドキュメントを解析",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string",
+            "required": true
+          },
+          "format": {
+            "type": "string",
+            "required": false
+          }
+        }
+      }
+    },
+    {
+      "name": "execute",
+      "description": "タスクを実行",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "description": "タスクID"
+          },
+          "action": {
+            "type": "string",
+            "description": "アクション名"
+          },
+          "parameters": {
+            "type": "object",
+            "description": "パラメータ"
+          }
+        }
+      }
+    }
+  ],
+  "calls": [
+    {
+      "call": {
+        "name": "execute",
+        "arguments": {
+          "task_id": "g-1",
+          "action": "research",
+          "parameters": {
+            "query": "CI/CD",
+            "depth": "detailed"
+          }
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"taskId\": \"g-1\",\n  \"status\": \"completed\",\n  \"result\": {\n    \"summary\": \"「CI/CD」に関する調査結果:\\n\\nページの内容: https://example.com/result1...\",\n    \"sources\": [\n      {\n        \"title\": \"検索結果: CI/CD\",\n        \"url\": \"https://example.com/result1\",\n        \"snippet\": \"CI/CDに関する情報です。\"\n      }\n    ],\n    \"confidence\": 0.5\n  },\n  \"confidence\": 0.5,\n  \"metrics\": {\n    \"duration_ms\": \"<DURATION>\",\n    \"tools_called\": 2\n  }\n}"
+          }
+        ]
+      }
+    },
+    {
+      "call": {
+        "name": "web_search",
+        "arguments": {
+          "query": "rust"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"results\": [\n    {\n      \"title\": \"検索結果: rust\",\n      \"url\": \"https://example.com/result1\",\n      \"snippet\": \"rustに関する情報です。\"\n    }\n  ],\n  \"query\": \"rust\",\n  \"count\": 1\n}"
+          }
+        ]
+      }
+    },
+    {
+      "call": {
+        "name": "web_fetch",
+        "arguments": {
+          "url": "https://example.com/x"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"url\": \"https://example.com/x\",\n  \"content\": \"ページの内容: https://example.com/x\",\n  \"title\": \"ページタイトル\"\n}"
+          }
+        ]
+      }
+    },
+    {
+      "call": {
+        "name": "document_parser",
+        "arguments": {
+          "content": "abc"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"parsed\": true,\n  \"sections\": [\n    \"セクション1\",\n    \"セクション2\"\n  ],\n  \"summary\": \"ドキュメントの要約\"\n}"
+          }
+        ]
+      }
+    },
+    {
+      "call": {
+        "name": "nope",
+        "arguments": {
+          "a": 1
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Tool nope not available for ResearchAgent"
+          }
+        ],
+        "isError": true
+      }
+    }
+  ],
+  "stdout_non_json_lines": 45
+}

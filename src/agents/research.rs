@@ -1,0 +1,208 @@
+//! Research Agent 実装
+
+use crate::core::subagent::{AgentBase, Subagent};
+use crate::core::tool::Tool;
+use crate::error::Result;
+use crate::tools::{js_display, DocumentParserTool, WebFetchTool, WebSearchTool};
+use crate::types::{
+    js_substring, BehaviorConfig, Backoff, ErrorAction, ErrorHandlingStrategy, InterfaceConfig,
+    ParameterDefinition, RetryPolicy, RoleConfig, SubagentConfig, Task, TaskResult,
+    ToolAlternative,
+};
+use crate::utils::{ErrorHandler, RetryManager};
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use std::sync::Arc;
+
+pub struct ResearchAgent {
+    base: AgentBase,
+    retry_manager: RetryManager,
+    error_handler: ErrorHandler,
+}
+
+impl ResearchAgent {
+    pub fn default_config() -> SubagentConfig {
+        SubagentConfig {
+            id: "research-001".into(),
+            name: "ResearchAgent".into(),
+            version: "1.0.0".into(),
+            role: RoleConfig {
+                description: "情報収集と要約を担当".into(),
+                capabilities: vec![
+                    "web_search".into(),
+                    "document_analysis".into(),
+                    "summarization".into(),
+                ],
+                constraints: json!({ "max_search_queries": 10, "max_tokens_output": 4000 })
+                    .as_object()
+                    .cloned(),
+            },
+            interface: InterfaceConfig {
+                input: vec![
+                    ParameterDefinition::new("query", "string", true),
+                    ParameterDefinition::new("context", "object", false),
+                ],
+                output: vec![ParameterDefinition {
+                    schema: Some(json!({ "summary": "string", "sources": "array", "confidence": "number" })),
+                    ..ParameterDefinition::new("result", "object", true)
+                }],
+            },
+            tools: vec!["web_search".into(), "web_fetch".into(), "document_parser".into()],
+            behavior: BehaviorConfig {
+                retry_policy: Some(RetryPolicy {
+                    max_attempts: 3,
+                    backoff: Backoff::Exponential,
+                    initial_delay_ms: Some(1000),
+                }),
+                timeout: Some(60000),
+                fallback: Some("return_partial".into()),
+            },
+        }
+    }
+
+    pub fn new() -> Self {
+        Self::with_config(Self::default_config())
+    }
+
+    pub fn with_config(config: SubagentConfig) -> Self {
+        let policy = config
+            .behavior
+            .retry_policy
+            .clone()
+            .or_else(|| Self::default_config().behavior.retry_policy)
+            .expect("default retry policy");
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(WebSearchTool::default()),
+            Arc::new(WebFetchTool::default()),
+            Arc::new(DocumentParserTool::default()),
+        ];
+        let base = AgentBase::new(config, tools);
+        let retry_manager = RetryManager::new(policy, base.logger.clone());
+        let error_handler = ErrorHandler::new(
+            ErrorHandlingStrategy {
+                timeout: Some(ErrorAction {
+                    max_retries: Some(3),
+                    fallback: Some("delegate_to_alternative".into()),
+                    ..ErrorAction::new("retry_with_backoff")
+                }),
+                tool_failure: Some(ErrorAction {
+                    alternatives: Some(vec![ToolAlternative {
+                        primary: "web_search".into(),
+                        backup: "document_parser".into(),
+                    }]),
+                    ..ErrorAction::new("use_alternative_tool")
+                }),
+                partial_failure: Some(ErrorAction {
+                    notify: Some(true),
+                    ..ErrorAction::new("return_partial_with_flag")
+                }),
+                ..Default::default()
+            },
+            base.logger.clone(),
+        );
+        ResearchAgent {
+            base,
+            retry_manager,
+            error_handler,
+        }
+    }
+
+    /// 情報を統合して要約を生成（実際の実装では LLM を使用）
+    fn synthesize(details: &[Value], query: Option<&Value>) -> String {
+        let summaries = details
+            .iter()
+            .map(|d| {
+                [d.get("content"), d.get("summary")]
+                    .into_iter()
+                    .flatten()
+                    .find(|v| crate::types::is_truthy(v))
+                    .map(|v| js_display(Some(v)))
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        format!(
+            "「{}」に関する調査結果:\n\n{}...",
+            js_display(query),
+            js_substring(&summaries, 1000)
+        )
+    }
+
+    /// 信頼度を計算
+    fn calculate_confidence(details: &[Value]) -> f64 {
+        match details.len() {
+            0 => 0.0,
+            1 => 0.5,
+            2 => 0.7,
+            _ => 0.9,
+        }
+    }
+}
+
+impl Default for ResearchAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Subagent for ResearchAgent {
+    fn base(&self) -> &AgentBase {
+        &self.base
+    }
+
+    async fn execute(&self, task: Task) -> Result<TaskResult> {
+        let base = &self.base;
+        base.run_task(&task, &self.error_handler, "RESEARCH_ERROR", || async {
+            let query = task.parameters.get("query").cloned();
+            let depth = task.param_str("depth").unwrap_or("standard");
+
+            base.report_progress(&task.id, 0.1, "検索を開始");
+
+            // 1. 検索実行
+            let mut search_params = crate::types::JsonMap::new();
+            if let Some(q) = &query {
+                search_params.insert("query".into(), q.clone());
+            }
+            search_params.insert(
+                "max_results".into(),
+                json!(if depth == "detailed" { 10 } else { 5 }),
+            );
+            let search_results = self
+                .retry_manager
+                .execute_with_retry(|| base.call_tool("web_search", search_params.clone()))
+                .await?;
+            base.report_progress(&task.id, 0.3, "検索完了");
+
+            // 2. 詳細取得（上位3件を並列で）
+            let sources = search_results.get("results").cloned().unwrap_or(json!([]));
+            let top: Vec<Value> = sources
+                .as_array()
+                .map(|a| a.iter().take(3).cloned().collect())
+                .unwrap_or_default();
+            let details = futures::future::try_join_all(top.iter().map(|r| {
+                let mut p = crate::types::JsonMap::new();
+                if let Some(url) = r.get("url") {
+                    p.insert("url".into(), url.clone());
+                }
+                self.retry_manager
+                    .execute_with_retry(move || base.call_tool("web_fetch", p.clone()))
+            }))
+            .await?;
+            base.report_progress(&task.id, 0.7, "詳細取得完了");
+
+            // 3. 要約生成
+            let summary = Self::synthesize(&details, query.as_ref());
+            base.report_progress(&task.id, 0.9, "要約生成完了");
+
+            let confidence = Self::calculate_confidence(&details);
+            let result = json!({
+                "summary": summary,
+                "sources": sources,
+                "confidence": crate::types::js_number(confidence),
+            });
+            Ok((result, confidence, 1 + details.len() as u64))
+        })
+        .await
+    }
+}

@@ -1,34 +1,20 @@
 {
   "mcpServers": {
     "subagent-research": {
-      "command": "node",
-      "args": ["./dist/mcp/research-server.js"],
-      "env": {
-        "AGENT_ID": "research-001",
-        "MAX_CONCURRENT": "5"
-      }
+      "command": "./target/release/research-server",
+      "args": []
     },
     "subagent-codegen": {
-      "command": "node",
-      "args": ["./dist/mcp/codegen-server.js"],
-      "env": {
-        "AGENT_ID": "codegen-001"
-      }
+      "command": "./target/release/codegen-server",
+      "args": []
     },
     "subagent-review": {
-      "command": "node",
-      "args": ["./dist/mcp/review-server.js"],
-      "env": {
-        "AGENT_ID": "review-001"
-      }
+      "command": "./target/release/review-server",
+      "args": []
     },
     "subagent-document": {
-      "command": "node",
-      "args": ["./dist/mcp/document-server.js"],
-      "env": {
-        "AGENT_ID": "document-001"
-      }
+      "command": "./target/release/document-server",
+      "args": []
     }
   }
 }
-
