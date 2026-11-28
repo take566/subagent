@@ -718,3 +718,34 @@ async fn file_limit_is_counted_per_task() {
         .unwrap_err();
     assert_eq!(e.name(), "SandboxError", "{e}");
 }
+
+/// create_default_orchestrator の 4 エージェントは typed tool を持ち、LLM は Unconfigured。
+/// typed tool は mock の出力を返さずに NotConfigured になる（`execute` は従来どおり）
+#[tokio::test]
+async fn default_orchestrator_agents_have_typed_tools_without_llm() {
+    use subagent::core::CallCtx;
+    use subagent::llm::LlmError;
+    let o = subagent::create_default_orchestrator();
+    for (id, tool, args) in [
+        ("research-001", "research", json!({ "query": "q" })),
+        ("codegen-001", "codegen", json!({ "task": "t" })),
+        ("review-001", "review", json!({ "code": "fn a() {}" })),
+        ("document-001", "document", json!({ "content": "c" })),
+    ] {
+        let agent = o.get_subagent(id).unwrap();
+        let t = agent.typed_tool().unwrap();
+        assert_eq!(t.name, tool);
+        assert_eq!(t.input_schema["additionalProperties"], json!(false), "{id}");
+        assert!(t.input_schema["required"].is_array(), "{id}");
+        // behavior.timeout は既定で無い（deadline は SUBAGENT_DEADLINE_SECS だけ）
+        assert_eq!(agent.get_config().behavior.timeout, None, "{id}");
+        let ctx = CallCtx::with_deadline(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
+        let e = agent.call_typed(args, ctx).await.unwrap_err();
+        assert!(
+            matches!(e, subagent::Error::Llm(LlmError::NotConfigured)),
+            "{id}: {e:?}"
+        );
+    }
+}

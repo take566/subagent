@@ -1,8 +1,11 @@
 //! Document Agent 実装
 
+use crate::agents::common;
+use crate::core::call::CallCtx;
 use crate::core::subagent::{AgentBase, Subagent};
 use crate::core::tool::Tool;
 use crate::error::{Error, Result};
+use crate::llm::{AgentKind, AgentLlm, AgentLlmSettings, LlmClient};
 use crate::sandbox::Sandbox;
 use crate::tools::{FileCreateTool, NotionClient, NotionPageCreateTool, NotionPageUpdateTool};
 use crate::types::{
@@ -11,6 +14,7 @@ use crate::types::{
 };
 use crate::utils::{ErrorHandler, RetryManager};
 use async_trait::async_trait;
+use rmcp::model::Tool as McpTool;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,9 +24,34 @@ pub struct DocumentAgent {
     #[allow(dead_code)] // 将来の拡張用（TS 版と同じ）
     retry_manager: RetryManager,
     error_handler: ErrorHandler,
+    llm: AgentLlm,
 }
 
 impl DocumentAgent {
+    /// typed tool の名前
+    pub const TYPED_TOOL: &'static str = "document";
+
+    /// LLM を差し替える（`new()` などの既定は通信しない [`crate::llm::UnconfiguredLlm`]）
+    pub fn with_llm(mut self, client: Arc<dyn LlmClient>, settings: AgentLlmSettings) -> Self {
+        self.llm = AgentLlm::new(client, settings);
+        self
+    }
+
+    pub fn llm(&self) -> &AgentLlm {
+        &self.llm
+    }
+
+    /// typed tool の引数を `execute` の parameters に写す（format の `md` は `markdown`）
+    fn typed_params(args: &Value) -> JsonMap {
+        let mut p = JsonMap::new();
+        common::copy_arg(args, "content", &mut p, "content");
+        if let Some(format) = args.get("format").and_then(Value::as_str) {
+            let format = if format == "md" { "markdown" } else { format };
+            p.insert("format".into(), json!(format));
+        }
+        p
+    }
+
     pub fn default_config() -> SubagentConfig {
         SubagentConfig {
             id: "document-001".into(),
@@ -58,7 +87,8 @@ impl DocumentAgent {
                     backoff: Backoff::Fixed,
                     initial_delay_ms: Some(500),
                 }),
-                timeout: Some(30000),
+                // 打ち切りは SUBAGENT_DEADLINE_SECS（MCP）。Some にすると deadline をそれ以下に縮める
+                timeout: None,
                 fallback: Some("return_partial".into()),
             },
         }
@@ -114,6 +144,7 @@ impl DocumentAgent {
             base,
             retry_manager,
             error_handler,
+            llm: AgentLlm::unconfigured(AgentKind::Document),
         }
     }
 
@@ -148,6 +179,40 @@ impl Default for DocumentAgent {
 impl Subagent for DocumentAgent {
     fn base(&self) -> &AgentBase {
         &self.base
+    }
+
+    fn typed_tool(&self) -> Option<McpTool> {
+        Some(common::typed_tool(
+            Self::TYPED_TOOL,
+            "ドキュメントを書いて workspace の docs/ に保存する",
+            json!({
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string", "description": "書く内容（verbatim ならそのまま保存する本文）" },
+                    "format": {
+                        "type": "string",
+                        "enum": ["md", "txt", "html"],
+                        "description": "出力形式（既定 md）"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["llm", "verbatim"],
+                        "description": "llm は LLM が書く（既定）、verbatim は content をそのまま保存する"
+                    },
+                    "title": { "type": "string", "description": "題名" }
+                },
+                "required": ["content"],
+                "additionalProperties": false
+            }),
+        ))
+    }
+
+    /// 3a の仮実装: 引数を既存の `execute` に写す（LLM が未設定ならエラー）。
+    /// `mode` / `title` はまだ使わない。3b で置き換える
+    async fn call_typed(&self, args: Value, _ctx: CallCtx) -> Result<Value> {
+        let p = Self::typed_params(&args);
+        self.llm.ensure_configured()?;
+        common::task_value(self.execute(common::typed_task("document", p)).await?)
     }
 
     async fn execute(&self, task: Task) -> Result<TaskResult> {
@@ -195,6 +260,21 @@ impl Subagent for DocumentAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_format_md_maps_to_markdown() {
+        let p = |args: Value| Value::Object(DocumentAgent::typed_params(&args));
+        assert_eq!(
+            p(json!({ "content": "c", "format": "md", "mode": "llm", "title": "t" })),
+            json!({ "content": "c", "format": "markdown" })
+        );
+        assert_eq!(
+            p(json!({ "content": "c", "format": "html" })),
+            json!({ "content": "c", "format": "html" })
+        );
+        // 省略時は execute の既定（markdown）
+        assert_eq!(p(json!({ "content": "c" })), json!({ "content": "c" }));
+    }
 
     #[test]
     fn formatting_and_paths() {

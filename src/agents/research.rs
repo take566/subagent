@@ -1,16 +1,20 @@
 //! Research Agent 実装
 
+use crate::agents::common;
+use crate::core::call::CallCtx;
 use crate::core::subagent::{AgentBase, Subagent};
 use crate::core::tool::Tool;
 use crate::error::Result;
+use crate::llm::{AgentKind, AgentLlm, AgentLlmSettings, LlmClient};
 use crate::tools::{DocumentParserTool, WebFetchTool, WebSearchTool, js_display};
 use crate::types::{
-    Backoff, BehaviorConfig, ErrorAction, ErrorHandlingStrategy, InterfaceConfig,
+    Backoff, BehaviorConfig, ErrorAction, ErrorHandlingStrategy, InterfaceConfig, JsonMap,
     ParameterDefinition, RetryPolicy, RoleConfig, SubagentConfig, Task, TaskResult,
     ToolAlternative, js_substring,
 };
 use crate::utils::{ErrorHandler, RetryManager};
 use async_trait::async_trait;
+use rmcp::model::Tool as McpTool;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -18,9 +22,23 @@ pub struct ResearchAgent {
     base: AgentBase,
     retry_manager: RetryManager,
     error_handler: ErrorHandler,
+    llm: AgentLlm,
 }
 
 impl ResearchAgent {
+    /// typed tool の名前
+    pub const TYPED_TOOL: &'static str = "research";
+
+    /// LLM を差し替える（`new()` などの既定は通信しない [`crate::llm::UnconfiguredLlm`]）
+    pub fn with_llm(mut self, client: Arc<dyn LlmClient>, settings: AgentLlmSettings) -> Self {
+        self.llm = AgentLlm::new(client, settings);
+        self
+    }
+
+    pub fn llm(&self) -> &AgentLlm {
+        &self.llm
+    }
+
     pub fn default_config() -> SubagentConfig {
         SubagentConfig {
             id: "research-001".into(),
@@ -60,7 +78,8 @@ impl ResearchAgent {
                     backoff: Backoff::Exponential,
                     initial_delay_ms: Some(1000),
                 }),
-                timeout: Some(60000),
+                // 打ち切りは SUBAGENT_DEADLINE_SECS（MCP）。Some にすると deadline をそれ以下に縮める
+                timeout: None,
                 fallback: Some("return_partial".into()),
             },
         }
@@ -119,6 +138,7 @@ impl ResearchAgent {
             base,
             retry_manager,
             error_handler,
+            llm: AgentLlm::unconfigured(AgentKind::Research),
         }
     }
 
@@ -164,6 +184,40 @@ impl Default for ResearchAgent {
 impl Subagent for ResearchAgent {
     fn base(&self) -> &AgentBase {
         &self.base
+    }
+
+    fn typed_tool(&self) -> Option<McpTool> {
+        Some(common::typed_tool(
+            Self::TYPED_TOOL,
+            "Web を調べて要約と出典を返す",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "調べる内容" },
+                    "depth": {
+                        "type": "string",
+                        "enum": ["quick", "standard", "detailed"],
+                        "description": "調べる深さ（既定 standard）"
+                    },
+                    "allowed_domains": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "検索・取得を許すドメイン（省略時は制限なし）"
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        ))
+    }
+
+    /// 3a の仮実装: 引数を既存の `execute` に写す（LLM が未設定ならエラー）。3d で置き換える
+    async fn call_typed(&self, args: Value, _ctx: CallCtx) -> Result<Value> {
+        let mut p = JsonMap::new();
+        common::copy_arg(&args, "query", &mut p, "query");
+        common::copy_arg(&args, "depth", &mut p, "depth");
+        self.llm.ensure_configured()?;
+        common::task_value(self.execute(common::typed_task("research", p)).await?)
     }
 
     async fn execute(&self, task: Task) -> Result<TaskResult> {

@@ -4,6 +4,7 @@
 //! 共通の状態・ツール・イベント配信を持つ [`AgentBase`] と、
 //! 各エージェントが実装する [`Subagent`] トレイトに分けている。
 
+use crate::core::call::CallCtx;
 use crate::core::tool::{Tool, ToolRegistry};
 use crate::error::{Error, Result};
 use crate::types::{
@@ -13,6 +14,7 @@ use crate::types::{
 use crate::utils::error_handler::ErrorHandler;
 use crate::utils::logger::{LogContext, LogFields, Logger};
 use async_trait::async_trait;
+use rmcp::model::Tool as McpTool;
 use serde_json::{Value, json};
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -370,8 +372,28 @@ impl Drop for CancelGuard<'_> {
 pub trait Subagent: Send + Sync {
     fn base(&self) -> &AgentBase;
 
-    /// タスクを実行
+    /// タスクを実行（Orchestrator と MCP の `execute` が使う）
     async fn execute(&self, task: Task) -> Result<TaskResult>;
+
+    /// MCP で公開する typed tool（name / description / inputSchema）。無ければ None。
+    ///
+    /// inputSchema は `additionalProperties: false` と `required` を持つ object。server は
+    /// [`Self::call_typed`] を呼ぶ前にこの schema で引数を確かめる。
+    fn typed_tool(&self) -> Option<McpTool> {
+        None
+    }
+
+    /// typed tool を実行する。`args` は [`Self::typed_tool`] の schema を通ったもの。
+    ///
+    /// LLM が未設定なら [`crate::llm::LlmError::NotConfigured`] を返す（mock の出力は返さない）。
+    /// `ctx.deadline` / `ctx.cancel` で server が打ち切る（future は drop される）。
+    async fn call_typed(&self, args: Value, ctx: CallCtx) -> Result<Value> {
+        let _ = (args, ctx);
+        Err(Error::other(format!(
+            "{} has no typed tool",
+            self.get_config().name
+        )))
+    }
 
     fn id(&self) -> &str {
         self.base().id()

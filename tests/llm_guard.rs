@@ -1,14 +1,21 @@
 //! guard: API 鍵が env にあっても、`new()` で作ったエージェントと既定の LLM client は通信しない。
 //!
 //! HTTP(S)_PROXY を 127.0.0.1 の wiremock に向け、外へ出る通信を全部そこで捕まえる。
+//! typed tool（`call_typed`）は鍵があっても Unconfigured のまま NotConfigured を返す。
 //! 捕まえられることは陽性対照（明示的に作った AnthropicClient）で確かめる。
 //! env を書き換えるので、この test binary にはこの test だけを置く。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::json;
+use subagent::core::CallCtx;
 use subagent::llm::{AnthropicClient, LlmClient, LlmConfig, LlmError, Message, MessageRequest};
-use subagent::{CodeGenAgent, DocumentAgent, Orchestrator, ResearchAgent, ReviewAgent, Task, llm};
+use subagent::{
+    CodeGenAgent, DocumentAgent, Error, Orchestrator, ResearchAgent, ReviewAgent, Subagent, Task,
+    llm,
+};
+use tokio::time::Instant;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
 
 #[test]
@@ -87,6 +94,40 @@ fn keys_in_env_do_not_make_default_constructed_code_call_the_api() {
         ];
         let r = o.execute(tasks, None).await.unwrap();
         assert!(r.success, "{:?}", r.results);
+
+        // typed tool は Unconfigured なら mock の出力を返さずに NotConfigured（ファイルも作らない）
+        let typed: Vec<(Arc<dyn Subagent>, serde_json::Value)> = vec![
+            (Arc::new(ResearchAgent::new()), json!({"query": "rust"})),
+            (
+                Arc::new(CodeGenAgent::with_options(
+                    CodeGenAgent::default_config(),
+                    Some(dir.path().join("typed")),
+                )),
+                json!({"task": "add two numbers"}),
+            ),
+            (
+                Arc::new(ReviewAgent::new()),
+                json!({"code": "fn main() {}"}),
+            ),
+            (
+                Arc::new(DocumentAgent::with_options(
+                    DocumentAgent::default_config(),
+                    Some(dir.path().join("typed")),
+                )),
+                json!({"content": "# T"}),
+            ),
+        ];
+        for (agent, args) in typed {
+            assert!(agent.typed_tool().is_some(), "{}", agent.id());
+            let ctx = CallCtx::with_deadline(Instant::now() + Duration::from_secs(60));
+            let e = agent.call_typed(args, ctx).await.unwrap_err();
+            assert!(
+                matches!(e, Error::Llm(LlmError::NotConfigured)),
+                "{}: {e:?}",
+                agent.id()
+            );
+        }
+        assert!(!dir.path().join("typed").join("docs").exists());
         assert_eq!(
             trap.received_requests().await.unwrap().len(),
             0,

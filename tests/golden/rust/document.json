@@ -1,0 +1,265 @@
+{
+  "initialize": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {
+      "tools": {}
+    },
+    "serverInfo": {
+      "name": "DocumentAgent",
+      "version": "1.0.0"
+    }
+  },
+  "tools_list": {
+    "hermes": [
+      {
+        "name": "document",
+        "description": "ドキュメントを書いて workspace の docs/ に保存する",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string",
+              "description": "書く内容（verbatim ならそのまま保存する本文）"
+            },
+            "format": {
+              "type": "string",
+              "enum": [
+                "md",
+                "txt",
+                "html"
+              ],
+              "description": "出力形式（既定 md）"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "llm",
+                "verbatim"
+              ],
+              "description": "llm は LLM が書く（既定）、verbatim は content をそのまま保存する"
+            },
+            "title": {
+              "type": "string",
+              "description": "題名"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "full": [
+      {
+        "name": "file_create",
+        "description": "ファイルを作成",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "required": true
+            },
+            "content": {
+              "type": "string",
+              "required": true
+            }
+          }
+        }
+      },
+      {
+        "name": "notion_page_create",
+        "description": "Notionページを作成",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "parent_page_id": {
+              "type": "string",
+              "required": true
+            },
+            "title": {
+              "type": "string",
+              "required": true
+            },
+            "content": {
+              "type": "string",
+              "required": false
+            }
+          }
+        }
+      },
+      {
+        "name": "notion_page_update",
+        "description": "Notionページを更新（タイトル変更・本文追記）",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "page_id": {
+              "type": "string",
+              "required": true
+            },
+            "title": {
+              "type": "string",
+              "required": false
+            },
+            "content": {
+              "type": "string",
+              "required": false
+            }
+          }
+        }
+      },
+      {
+        "name": "execute",
+        "description": "タスクを実行",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "タスクID"
+            },
+            "action": {
+              "type": "string",
+              "description": "アクション名"
+            },
+            "parameters": {
+              "type": "object",
+              "description": "パラメータ"
+            }
+          }
+        }
+      },
+      {
+        "name": "document",
+        "description": "ドキュメントを書いて workspace の docs/ に保存する",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string",
+              "description": "書く内容（verbatim ならそのまま保存する本文）"
+            },
+            "format": {
+              "type": "string",
+              "enum": [
+                "md",
+                "txt",
+                "html"
+              ],
+              "description": "出力形式（既定 md）"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "llm",
+                "verbatim"
+              ],
+              "description": "llm は LLM が書く（既定）、verbatim は content をそのまま保存する"
+            },
+            "title": {
+              "type": "string",
+              "description": "題名"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  "typed_errors": [
+    {
+      "case": "unexpected_field",
+      "call": {
+        "name": "document",
+        "arguments": {
+          "content": "# T",
+          "format": "md",
+          "nope": 1
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: unexpected field `nope`"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "wrong_type",
+      "call": {
+        "name": "document",
+        "arguments": {
+          "content": "x",
+          "format": "pdf"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: field `format` must be one of [\"md\",\"txt\",\"html\"]"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "not_configured",
+      "call": {
+        "name": "document",
+        "arguments": {
+          "content": "# T",
+          "format": "md"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: LLM is not configured (set SUBAGENT_ANTHROPIC_API_KEY)"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "missing_required",
+      "call": {
+        "name": "document",
+        "arguments": {}
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: missing required field `content`"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "missing_arguments",
+      "call": {
+        "name": "document"
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Missing arguments"
+          }
+        ],
+        "isError": true
+      }
+    }
+  ]
+}

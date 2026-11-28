@@ -135,13 +135,41 @@ cargo build --release
 ```
 
 クライアント設定例は [mcp-config.example.json](mcp-config.example.json) を参照してください。`command` の相対パスはクライアントの作業ディレクトリ基準で解決されるので、実際には絶対パスに書き換えてください。
-各サーバーはエージェントのツールに加えて、タスクを丸ごと実行する `execute` ツールを公開します。
-`execute` の引数は `action`（必須、空でない文字列）、`task_id`（任意、空でない文字列）、`parameters`（任意、object）です。型が違うと `Error: Invalid arguments: ...` を返します。
+
+### 公開するツール（`SUBAGENT_MCP_MODE`）
+
+- `hermes`（既定）: 各サーバーの **typed tool 1 つだけ**を公開します。それ以外のツール（direct tool と `execute`）の呼び出しは `Error: Tool ... is not available (SUBAGENT_MCP_MODE=hermes ...)` で拒否します。`full` 以外の値（空・typo を含む）はすべて `hermes` として扱います
+- `full`: エージェントのツール（direct tool: `web_search` / `file_create` / `bash_tool` / `view` / `notion_page_create` など）と `execute`、typed tool を公開します（従来の挙動 + typed tool）
+
+typed tool（inputSchema はどれも `additionalProperties: false`。server 側でも引数を検証し、違えば `Error: Invalid arguments: ...`）:
+
+| サーバー | tool | 引数 |
+|---|---|---|
+| research-server | `research` | `query`（必須）, `depth`（`quick` / `standard` / `detailed`）, `allowed_domains`（文字列の配列） |
+| codegen-server | `codegen` | `task`（必須）, `files`（workspace からの相対パスの配列）, `allow_commands`（bool） |
+| review-server | `review` | `code` か `path`（workspace からの相対パス）のどちらか一方, `language`, `lint`（bool。server の `SUBAGENT_REVIEW_LINT_COMMAND` を実行） |
+| document-server | `document` | `content`（必須）, `format`（`md` / `txt` / `html`）, `mode`（`llm` / `verbatim`）, `title` |
+
+LLM が未設定（鍵が無い）なら typed tool は mock の結果を返さず、`Error: LLM is not configured (set SUBAGENT_ANTHROPIC_API_KEY)` の isError を返します。現時点（Phase 3a）の typed tool は引数を従来の `execute` に写すだけの仮実装で、LLM を使う実装は各エージェントの Phase 3b〜3e で入ります（`files` / `allow_commands` / `allowed_domains` / `language` / `mode` / `title` はまだ使いません）。
+
+`execute`（`full` のみ）の引数は `action`（必須、空でない文字列）、`task_id`（任意、空でない文字列。省略時は `task-<uuid>`）、`parameters`（任意、object）です。型が違うと `Error: Invalid arguments: ...` を返します。
+
+1 回の tools/call は、request を受けた時から `SUBAGENT_DEADLINE_SECS` 秒（既定 540）で打ち切って `Error: Deadline exceeded ...` を返します（`MAX_CONCURRENT` の待ちも含みます）。client の `notifications/cancelled` でも打ち切ります（実行中の子プロセスも止め、取り消した request には応答も進捗も送りません）。request の `_meta.progressToken` があれば `notifications/progress` を送ります（開始・LLM との往復ごと・終了。`progress` は 1 ずつ増え、終了の通知だけ `total` が付き、応答より前に届きます。応答の後には送りません。通知を 2 秒以内に送れない時はその通知を諦め、呼び出しは止めません）。
 
 | 環境変数 | 意味 |
 |---|---|
 | `AGENT_ID` | エージェントの id を上書きする（前後の空白は除く。空なら既定の id） |
 | `MAX_CONCURRENT` | tools/call の同時実行数の上限。正の整数のときだけ有効で、未設定・不正値は無制限 |
+| `SUBAGENT_MCP_MODE` | `hermes`（既定）か `full`。上を参照。`full` 以外は `hermes` |
+| `SUBAGENT_DEADLINE_SECS` | 1 回の tools/call の deadline（秒、既定 540）。1〜86400 の整数でなければ（`abc`・`300s`・`0` など）起動しません（exit code 2）。エージェントの `behavior.timeout` を設定した場合は短い方 |
+| `SUBAGENT_ANTHROPIC_API_KEY`（無ければ `ANTHROPIC_API_KEY`） | Claude API の鍵。無ければ LLM は未設定（通信しない）。値はログ・エラーに出しません |
+| `SUBAGENT_MAX_TOKENS_PER_DAY` | 1 日（UTC）の token 上限（既定 2000000）。**server process ごと**の上限です（4 つの server はそれぞれ別に数えます。全体を抑えるには server ごとに設定します） |
+| `SUBAGENT_LLM_BACKEND` | 未設定・空・`anthropic` は Claude API。`replay` は `--features replay` で build した bin だけ（記録した応答を返すテスト用）。それ以外の値と、feature なしの bin の `replay` では起動しません（exit code 2） |
+| `SUBAGENT_LLM_REPLAY_FILE` | `replay` のときの記録ファイル（`MessageResponse` の JSON 配列。順に返す） |
+| `SUBAGENT_MODEL` / `SUBAGENT_<AGENT>_MODEL` | model（既定 `claude-opus-5-5`）。`<AGENT>` は `RESEARCH` / `CODEGEN` / `REVIEW` / `DOCUMENT` で、エージェント名付きが優先 |
+| `SUBAGENT_EFFORT` / `SUBAGENT_<AGENT>_EFFORT` | `low` / `medium` / `high` / `xhigh` / `max`（既定は送らない）。不正な値では起動しません |
+| `SUBAGENT_TOKEN_BUDGET` / `SUBAGENT_<AGENT>_TOKEN_BUDGET` | 1 タスクの token 予算（正の整数。既定 research 300000 / codegen 1000000 / review 100000 / document 100000）。不正な値では起動しません |
+| `SUBAGENT_REVIEW_LINT_COMMAND` | review の typed tool で `lint: true` のときに実行するコマンド（例 `cargo clippy`）。`bash_tool` と同じ allowlist を通るので、**その program を review-server の `SUBAGENT_CODEGEN_ALLOWED_COMMANDS` にも入れてください**（入っていなければ lint は実行されず、warn を出して lint 無しで続けます）。未設定で `lint: true` ならエラー |
 | `SUBAGENT_ROOTS` | **必須**（ファイル・コマンドのツールを使う場合）。workspace の root の絶対パス。複数なら OS の path 区切り（Windows は `;`、それ以外は `:`）で並べ、相対パスは最初の root 基準。未設定ならツールは拒否する |
 | `SUBAGENT_MAX_FILE_BYTES` | 1 ファイルの上限（既定 1048576 byte）。超えるファイルは読まず、書かない |
 | `SUBAGENT_MAX_FILES` | 1 タスクで書き込むファイル数の上限（既定 200）。エージェントのタスク（`execute`）と direct tool の呼び出しごとに数え直す |
@@ -216,9 +244,9 @@ src/
 └── bin/             # MCP サーバーのエントリーポイント
 tests/
 ├── orchestrator.rs  # Orchestrator の結合テスト
-├── mcp_golden.rs    # MCP 出力を TS 版の記録（golden）と比較。sandbox の MCP 経由の確認も
+├── mcp_golden.rs    # MCP の bin を起動して確かめる（TS 版の記録・Rust 版の golden・mode・progress・backend・sandbox）
 ├── sandbox.rs       # path の拒否・link での脱出・TOCTOU・上限・コマンドの制限
-└── golden/          # TS 版 MCP サーバーの出力記録
+└── golden/          # ts/: TS 版の出力記録（history only）、rust/: Rust 版の golden、replay/: replay の記録
 ```
 
 ## ライセンス

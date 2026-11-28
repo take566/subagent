@@ -1,8 +1,11 @@
 //! Review Agent 実装
 
+use crate::agents::common;
+use crate::core::call::CallCtx;
 use crate::core::subagent::{AgentBase, Subagent};
 use crate::core::tool::Tool;
 use crate::error::{Error, Result};
+use crate::llm::{AgentKind, AgentLlm, AgentLlmSettings, LlmClient};
 use crate::sandbox::Sandbox;
 use crate::tools::{LintTool, ViewTool};
 use crate::types::{
@@ -12,6 +15,7 @@ use crate::types::{
 use crate::utils::{ErrorHandler, RetryManager};
 use async_trait::async_trait;
 use regex::Regex;
+use rmcp::model::Tool as McpTool;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
@@ -21,6 +25,9 @@ pub struct ReviewAgent {
     #[allow(dead_code)] // 将来の拡張用（TS 版と同じ）
     retry_manager: RetryManager,
     error_handler: ErrorHandler,
+    llm: AgentLlm,
+    /// typed tool の `lint: true` で実行するコマンド（`SUBAGENT_REVIEW_LINT_COMMAND`）
+    lint_command: Option<String>,
 }
 
 struct Analysis {
@@ -67,7 +74,8 @@ impl ReviewAgent {
                     backoff: Backoff::Linear,
                     initial_delay_ms: Some(500),
                 }),
-                timeout: Some(60000),
+                // 打ち切りは SUBAGENT_DEADLINE_SECS（MCP）。Some にすると deadline をそれ以下に縮める
+                timeout: None,
                 fallback: Some("return_partial".into()),
             },
         }
@@ -123,7 +131,64 @@ impl ReviewAgent {
             base,
             retry_manager,
             error_handler,
+            llm: AgentLlm::unconfigured(AgentKind::Review),
+            lint_command: None,
         }
+    }
+
+    /// typed tool の名前
+    pub const TYPED_TOOL: &'static str = "review";
+
+    /// typed tool の `lint: true` で実行するコマンドの env（bin が読む）
+    pub const LINT_COMMAND_ENV: &'static str = "SUBAGENT_REVIEW_LINT_COMMAND";
+
+    /// LLM を差し替える（`new()` などの既定は通信しない [`crate::llm::UnconfiguredLlm`]）
+    pub fn with_llm(mut self, client: Arc<dyn LlmClient>, settings: AgentLlmSettings) -> Self {
+        self.llm = AgentLlm::new(client, settings);
+        self
+    }
+
+    pub fn llm(&self) -> &AgentLlm {
+        &self.llm
+    }
+
+    /// typed tool の `lint: true` で実行するコマンド（`bash_tool` と同じ allowlist を通る）。
+    /// 空白だけなら None と同じ
+    pub fn with_lint_command(mut self, command: Option<String>) -> Self {
+        self.lint_command = command
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty());
+        self
+    }
+
+    /// typed tool の引数を `execute` の parameters に写す（code と path はちょうど一方）
+    fn typed_params(&self, args: &Value) -> Result<JsonMap> {
+        let mut p = JsonMap::new();
+        match (args.get("code"), args.get("path")) {
+            (Some(_), Some(_)) => {
+                return Err(Error::InvalidParameter(
+                    "pass either `code` or `path`, not both".into(),
+                ));
+            }
+            (None, None) => {
+                return Err(Error::InvalidParameter(
+                    "`code` or `path` (relative to SUBAGENT_ROOTS) is required".into(),
+                ));
+            }
+            _ => {}
+        }
+        common::copy_arg(args, "code", &mut p, "source_code");
+        common::copy_arg(args, "path", &mut p, "source_path");
+        if args.get("lint") == Some(&Value::Bool(true)) {
+            let cmd = self.lint_command.clone().ok_or_else(|| {
+                Error::InvalidParameter(format!(
+                    "`lint` needs {} to be set on the server",
+                    Self::LINT_COMMAND_ENV
+                ))
+            })?;
+            p.insert("lint_command".into(), json!(cmd));
+        }
+        Ok(p)
     }
 
     /// `source_code` が（コードではなく）絶対パスに見えるか。こうした値は読まずに拒否する。
@@ -200,6 +265,37 @@ impl Default for ReviewAgent {
 impl Subagent for ReviewAgent {
     fn base(&self) -> &AgentBase {
         &self.base
+    }
+
+    fn typed_tool(&self) -> Option<McpTool> {
+        Some(common::typed_tool(
+            Self::TYPED_TOOL,
+            "コードをレビューして指摘・提案・スコアを返す（code か path のどちらか一方）",
+            json!({
+                "type": "object",
+                "properties": {
+                    "code": { "type": "string", "description": "レビューするコード" },
+                    "path": {
+                        "type": "string",
+                        "description": "レビューするファイル（SUBAGENT_ROOTS からの相対パス）"
+                    },
+                    "language": { "type": "string", "description": "言語（省略時は推定）" },
+                    "lint": {
+                        "type": "boolean",
+                        "description": "server に設定した lint（SUBAGENT_REVIEW_LINT_COMMAND）も実行するか"
+                    }
+                },
+                "required": [],
+                "additionalProperties": false
+            }),
+        ))
+    }
+
+    /// 3a の仮実装: 引数を既存の `execute` に写す（LLM が未設定ならエラー）。3c で置き換える
+    async fn call_typed(&self, args: Value, _ctx: CallCtx) -> Result<Value> {
+        let p = self.typed_params(&args)?;
+        self.llm.ensure_configured()?;
+        common::task_value(self.execute(common::typed_task("review", p)).await?)
     }
 
     async fn execute(&self, task: Task) -> Result<TaskResult> {
@@ -304,6 +400,40 @@ mod tests {
         assert_eq!(ReviewAgent::calculate_score(&issues, &a), 88);
         let many: Vec<Value> = (0..20).map(|_| json!({"type": "error"})).collect();
         assert_eq!(ReviewAgent::calculate_score(&many, &a), 0);
+    }
+
+    #[test]
+    fn typed_args_map_to_execute_params() {
+        let a = ReviewAgent::new();
+        let p = a.typed_params(&json!({ "code": "x" })).unwrap();
+        assert_eq!(Value::Object(p), json!({ "source_code": "x" }));
+        let p = a.typed_params(&json!({ "path": "src/a.rs" })).unwrap();
+        assert_eq!(Value::Object(p), json!({ "source_path": "src/a.rs" }));
+        assert!(
+            a.typed_params(&json!({ "code": "x", "path": "a" }))
+                .is_err()
+        );
+        assert!(a.typed_params(&json!({ "language": "rust" })).is_err());
+        // lint: true は server の SUBAGENT_REVIEW_LINT_COMMAND が要る
+        let e = a
+            .typed_params(&json!({ "code": "x", "lint": true }))
+            .unwrap_err();
+        assert!(e.to_string().contains(ReviewAgent::LINT_COMMAND_ENV), "{e}");
+        let a = ReviewAgent::new().with_lint_command(Some(" cargo clippy ".into()));
+        let p = a
+            .typed_params(&json!({ "code": "x", "lint": true }))
+            .unwrap();
+        assert_eq!(p["lint_command"], "cargo clippy");
+        let p = a
+            .typed_params(&json!({ "code": "x", "lint": false }))
+            .unwrap();
+        assert!(!p.contains_key("lint_command"));
+        assert!(
+            ReviewAgent::new()
+                .with_lint_command(Some("  ".into()))
+                .lint_command
+                .is_none()
+        );
     }
 
     #[test]

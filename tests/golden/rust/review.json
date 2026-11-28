@@ -1,0 +1,231 @@
+{
+  "initialize": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {
+      "tools": {}
+    },
+    "serverInfo": {
+      "name": "ReviewAgent",
+      "version": "1.0.0"
+    }
+  },
+  "tools_list": {
+    "hermes": [
+      {
+        "name": "review",
+        "description": "コードをレビューして指摘・提案・スコアを返す（code か path のどちらか一方）",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "description": "レビューするコード"
+            },
+            "path": {
+              "type": "string",
+              "description": "レビューするファイル（SUBAGENT_ROOTS からの相対パス）"
+            },
+            "language": {
+              "type": "string",
+              "description": "言語（省略時は推定）"
+            },
+            "lint": {
+              "type": "boolean",
+              "description": "server に設定した lint（SUBAGENT_REVIEW_LINT_COMMAND）も実行するか"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "full": [
+      {
+        "name": "view",
+        "description": "ファイルの内容を閲覧",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "required": true
+            }
+          }
+        }
+      },
+      {
+        "name": "bash_tool",
+        "description": "Lintを実行",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "required": true
+            },
+            "cwd": {
+              "type": "string",
+              "required": false
+            }
+          }
+        }
+      },
+      {
+        "name": "execute",
+        "description": "タスクを実行",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "タスクID"
+            },
+            "action": {
+              "type": "string",
+              "description": "アクション名"
+            },
+            "parameters": {
+              "type": "object",
+              "description": "パラメータ"
+            }
+          }
+        }
+      },
+      {
+        "name": "review",
+        "description": "コードをレビューして指摘・提案・スコアを返す（code か path のどちらか一方）",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "description": "レビューするコード"
+            },
+            "path": {
+              "type": "string",
+              "description": "レビューするファイル（SUBAGENT_ROOTS からの相対パス）"
+            },
+            "language": {
+              "type": "string",
+              "description": "言語（省略時は推定）"
+            },
+            "lint": {
+              "type": "boolean",
+              "description": "server に設定した lint（SUBAGENT_REVIEW_LINT_COMMAND）も実行するか"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  "typed_errors": [
+    {
+      "case": "unexpected_field",
+      "call": {
+        "name": "review",
+        "arguments": {
+          "code": "fn main() {}",
+          "nope": 1
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: unexpected field `nope`"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "wrong_type",
+      "call": {
+        "name": "review",
+        "arguments": {
+          "code": "x",
+          "lint": "yes"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: field `lint` must be of type \"boolean\""
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "not_configured",
+      "call": {
+        "name": "review",
+        "arguments": {
+          "code": "fn main() {}"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: LLM is not configured (set SUBAGENT_ANTHROPIC_API_KEY)"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "missing_arguments",
+      "call": {
+        "name": "review"
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Missing arguments"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "code_and_path",
+      "call": {
+        "name": "review",
+        "arguments": {
+          "code": "x",
+          "path": "a.rs"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid parameter: pass either `code` or `path`, not both"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "neither_code_nor_path",
+      "call": {
+        "name": "review",
+        "arguments": {}
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid parameter: `code` or `path` (relative to SUBAGENT_ROOTS) is required"
+          }
+        ],
+        "isError": true
+      }
+    }
+  ]
+}
