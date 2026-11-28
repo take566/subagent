@@ -8,6 +8,8 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
+use super::client::LlmError;
+
 /// 既定のモデル
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 
@@ -148,6 +150,10 @@ pub enum CacheType {
 }
 
 /// tool の定義
+///
+/// どの variant も `options` に追加の field（custom の `strict` / `cache_control` /
+/// `eager_input_streaming`、text editor の `max_characters` など）を持ち、そのまま送る。
+/// 中心の field（`type` / `name` / `description` / `input_schema`）は options で上書きできない。
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolDef {
     /// user-defined tool（name / description / input_schema）
@@ -155,17 +161,18 @@ pub enum ToolDef {
         name: String,
         description: String,
         input_schema: Value,
-    },
-    /// Anthropic-defined の text editor（client 実行、schema 無し）
-    TextEditor {
-        /// 追加の field（`max_characters` など）。そのまま送る
         options: Map<String, Value>,
     },
+    /// Anthropic-defined の text editor（client 実行、schema 無し）
+    TextEditor { options: Map<String, Value> },
     /// server tool の web search
     WebSearch { options: Map<String, Value> },
     /// server tool の web fetch
     WebFetch { options: Map<String, Value> },
 }
+
+/// options で上書きさせない field
+const RESERVED_TOOL_FIELDS: [&str; 4] = ["type", "name", "description", "input_schema"];
 
 impl ToolDef {
     pub fn custom(
@@ -177,6 +184,7 @@ impl ToolDef {
             name: name.into(),
             description: description.into(),
             input_schema,
+            options: Map::new(),
         }
     }
 
@@ -198,6 +206,18 @@ impl ToolDef {
         }
     }
 
+    /// 追加の field を 1 つ足す（中心の field の名前は送る時に無視される）
+    pub fn with_option(mut self, key: impl Into<String>, value: Value) -> Self {
+        let options = match &mut self {
+            ToolDef::Custom { options, .. }
+            | ToolDef::TextEditor { options }
+            | ToolDef::WebSearch { options }
+            | ToolDef::WebFetch { options } => options,
+        };
+        options.insert(key.into(), value);
+        self
+    }
+
     /// model が tool_use で返す name
     pub fn name(&self) -> &str {
         match self {
@@ -215,31 +235,39 @@ impl ToolDef {
 
     /// request に入れる JSON
     pub fn to_json(&self) -> Value {
-        let typed = |kind: &str, options: &Map<String, Value>| {
-            let mut obj = Map::new();
-            obj.insert("type".into(), Value::String(kind.into()));
-            obj.insert("name".into(), Value::String(self.name().into()));
-            for (k, v) in options {
-                if k != "type" && k != "name" {
-                    obj.insert(k.clone(), v.clone());
-                }
-            }
-            Value::Object(obj)
-        };
-        match self {
+        let (mut obj, options) = match self {
             ToolDef::Custom {
                 name,
                 description,
                 input_schema,
-            } => json!({
-                "name": name,
-                "description": description,
-                "input_schema": input_schema,
-            }),
-            ToolDef::TextEditor { options } => typed(TEXT_EDITOR_TYPE, options),
-            ToolDef::WebSearch { options } => typed(WEB_SEARCH_TYPE, options),
-            ToolDef::WebFetch { options } => typed(WEB_FETCH_TYPE, options),
+                options,
+            } => {
+                let mut obj = Map::new();
+                obj.insert("name".into(), Value::String(name.clone()));
+                obj.insert("description".into(), Value::String(description.clone()));
+                obj.insert("input_schema".into(), input_schema.clone());
+                (obj, options)
+            }
+            ToolDef::TextEditor { options }
+            | ToolDef::WebSearch { options }
+            | ToolDef::WebFetch { options } => {
+                let kind = match self {
+                    ToolDef::TextEditor { .. } => TEXT_EDITOR_TYPE,
+                    ToolDef::WebSearch { .. } => WEB_SEARCH_TYPE,
+                    _ => WEB_FETCH_TYPE,
+                };
+                let mut obj = Map::new();
+                obj.insert("type".into(), Value::String(kind.into()));
+                obj.insert("name".into(), Value::String(self.name().into()));
+                (obj, options)
+            }
+        };
+        for (k, v) in options {
+            if !RESERVED_TOOL_FIELDS.contains(&k.as_str()) {
+                obj.insert(k.clone(), v.clone());
+            }
         }
+        Value::Object(obj)
     }
 }
 
@@ -413,22 +441,31 @@ impl MessageResponse {
     }
 
     /// client 側で実行する tool_use（server_tool_use は含めない）
-    pub fn tool_uses(&self) -> Vec<ToolUse> {
+    ///
+    /// `id` か `name` が無い・空・文字列でない block は、空の id で tool_result を返すと
+    /// 400 になるので [`LlmError::Decode`] にする。
+    pub fn tool_uses(&self) -> Result<Vec<ToolUse>, LlmError> {
         self.content
             .iter()
-            .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
-            .map(|b| ToolUse {
-                id: b
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                name: b
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                input: b.get("input").cloned().unwrap_or(Value::Null),
+            .enumerate()
+            .filter(|(_, b)| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+            .map(|(i, b)| {
+                let field = |k: &str| {
+                    b.get(k)
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            LlmError::Decode(format!(
+                                "content[{i}]: tool_use block has no valid `{k}`"
+                            ))
+                        })
+                };
+                Ok(ToolUse {
+                    id: field("id")?,
+                    name: field("name")?,
+                    input: b.get("input").cloned().unwrap_or(Value::Null),
+                })
             })
             .collect()
     }

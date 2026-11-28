@@ -54,3 +54,4 @@ libc = "0.2.191"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+wiremock = "0.6.5"

@@ -43,6 +43,8 @@ jobs:
       # --locked: Cargo.lock の更新漏れを検出する
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+      - run: cargo clippy --all-targets --locked --features replay -- -D warnings
+      - run: cargo test --locked --features replay
       - run: cargo doc --no-deps --locked
         if: matrix.os == 'ubuntu-latest'
         env:
