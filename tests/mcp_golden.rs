@@ -2,6 +2,8 @@
 //!
 //! golden は TS 版（@modelcontextprotocol/sdk 0.5.0）の各サーバーに
 //! initialize → tools/list → tools/call を送って記録したもの。
+//! ただし `document.json` の tools のうち `notion_page_create` / `notion_page_update` は記録後に
+//! 手で足したもの（記録時の TS には無く、TS #45 の name / description / 引数定義に合わせた）。
 //! 実行ごとに変わる値（duration_ms、作業ディレクトリ、タイムスタンプ）は正規化して比較する。
 
 use serde_json::{Value, json};

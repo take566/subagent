@@ -1,10 +1,14 @@
 //! 組み込みツール実装（複数のエージェントで共有）
 
+pub mod lint_parsers;
+pub mod notion;
+
+pub use notion::{NotionClient, NotionPageCreateTool, NotionPageUpdateTool};
+
 use crate::core::tool::{Tool, param_defs};
 use crate::error::{Error, Result};
 use crate::types::{JsonMap, js_len};
 use async_trait::async_trait;
-use regex::Regex;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -197,17 +201,13 @@ impl Default for LintTool {
     }
 }
 
-/// lint 出力から `error` / `warning` を含む行を拾う
+/// lint 出力を言語別に解釈して issues（JSON）にする。
+/// ESLint / tsc / flake8・ruff のどれにも当たらなければ `error` / `warning` を含む行を拾う。
+/// 詳細は [`lint_parsers::parse_lint_findings`]。
 pub fn parse_lint_output(output: &str) -> Vec<Value> {
-    output
-        .split('\n')
-        .filter(|l| l.contains("error") || l.contains("warning"))
-        .map(|l| {
-            json!({
-                "type": if l.contains("error") { "error" } else { "warning" },
-                "message": l,
-            })
-        })
+    lint_parsers::parse_lint_findings(output)
+        .into_iter()
+        .map(|f| serde_json::to_value(f).expect("LintFinding serializes"))
         .collect()
 }
 
@@ -226,7 +226,10 @@ impl Tool for LintTool {
     async fn invoke(&self, params: JsonMap) -> Result<Value> {
         let command = required_str(&params, "command")?;
         let out = run_shell(command, optional_str(&params, "cwd")).await?;
-        let issues = parse_lint_output(&out.stdout);
+        // TS は stdout だけを見ていたが、cargo clippy のように指摘を stderr に出すツールも
+        // あるので両方を解釈する（stdout → stderr の順。言語の推定はそれぞれ別に行う）
+        let mut issues = parse_lint_output(&out.stdout);
+        issues.extend(parse_lint_output(&out.stderr));
         Ok(match out.error {
             None => json!({
                 "success": true,
@@ -251,8 +254,9 @@ impl Tool for LintTool {
 
 /// 文字列置換ツール。
 ///
-/// `search` は正規表現（Rust の `regex` 構文。JS と違い後方参照・先読みは不可）、
-/// `replace` は置換文字列（`$1` / `${name}` でグループ参照。JS の `$&` は `$0`）。
+/// `search` はリテラル文字列として扱い（正規表現ではない）、`replace` 内の `$1` `$&` なども
+/// 置換パターンとして解釈せずそのまま書き込む（TS #53）。一致が 0 件ならファイルを書き戻さず
+/// `replaced: false` を返す。
 pub struct StrReplaceTool {
     params: JsonMap,
     base_dir: Option<PathBuf>,
@@ -288,96 +292,24 @@ impl Tool for StrReplaceTool {
         let search = required_str(&params, "search")?;
         let replace = required_str(&params, "replace")?;
         let path = resolve_path(self.base_dir.as_deref(), file)?;
-        let re = Regex::new(search)?;
         let content = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| Error::io_at(&path, e))?;
-        let occurrences = re.find_iter(&content).count();
-        let new_content = js_replace_all(&re, &content, replace);
+        // TS の split/join と同じく、重ならない一致を左から数える。空文字列は 0 件
+        let occurrences = if search.is_empty() {
+            0
+        } else {
+            content.matches(search).count()
+        };
+        if occurrences == 0 {
+            return Ok(json!({ "file": file, "replaced": false, "occurrences": 0 }));
+        }
+        let new_content = content.replace(search, replace);
         tokio::fs::write(&path, new_content.as_bytes())
             .await
             .map_err(|e| Error::io_at(&path, e))?;
         Ok(json!({ "file": file, "replaced": true, "occurrences": occurrences }))
     }
-}
-
-/// JS の `String.prototype.replace(regex_g, string)` と同じ規則で置換する。
-/// 置換文字列の `$$` `$&` `` $` `` `$'` `$n` `$nn` `$<name>` を解釈し、
-/// それ以外の `$` は文字どおりに残す（Rust の `regex` の展開規則とは異なる）。
-pub fn js_replace_all(re: &Regex, haystack: &str, replacement: &str) -> String {
-    let group_count = re.captures_len() - 1;
-    let has_named = re.capture_names().flatten().next().is_some();
-    re.replace_all(haystack, |caps: &regex::Captures| {
-        let m = caps.get(0).expect("group 0 always matches");
-        let mut out = String::new();
-        let bytes = replacement.as_bytes();
-        let mut i = 0;
-        while i < replacement.len() {
-            let rest = &replacement[i..];
-            if !rest.starts_with('$') || rest.len() == 1 {
-                let ch = rest.chars().next().unwrap();
-                out.push(ch);
-                i += ch.len_utf8();
-                continue;
-            }
-            match bytes[i + 1] {
-                b'$' => {
-                    out.push('$');
-                    i += 2;
-                }
-                b'&' => {
-                    out.push_str(m.as_str());
-                    i += 2;
-                }
-                b'`' => {
-                    out.push_str(&haystack[..m.start()]);
-                    i += 2;
-                }
-                b'\'' => {
-                    out.push_str(&haystack[m.end()..]);
-                    i += 2;
-                }
-                d1 @ b'0'..=b'9' => {
-                    let one = (d1 - b'0') as usize;
-                    let two = bytes
-                        .get(i + 2)
-                        .filter(|b| b.is_ascii_digit())
-                        .map(|d2| one * 10 + (d2 - b'0') as usize);
-                    match two {
-                        Some(n) if (1..=group_count).contains(&n) => {
-                            out.push_str(caps.get(n).map_or("", |g| g.as_str()));
-                            i += 3;
-                        }
-                        _ if (1..=group_count).contains(&one) => {
-                            out.push_str(caps.get(one).map_or("", |g| g.as_str()));
-                            i += 2;
-                        }
-                        _ => {
-                            out.push('$');
-                            i += 1;
-                        }
-                    }
-                }
-                b'<' if has_named => match rest.find('>') {
-                    Some(end) => {
-                        let name = &rest[2..end];
-                        out.push_str(caps.name(name).map_or("", |g| g.as_str()));
-                        i += end + 1;
-                    }
-                    None => {
-                        out.push('$');
-                        i += 1;
-                    }
-                },
-                _ => {
-                    out.push('$');
-                    i += 1;
-                }
-            }
-        }
-        out
-    })
-    .into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -589,13 +521,29 @@ mod tests {
         let p = dir.path().join("a/b.txt");
         assert!(p.exists());
 
-        let r = StrReplaceTool::new(base)
+        // search はリテラル（TS #53）。`fo+` は正規表現として解釈されないので一致しない
+        let r = StrReplaceTool::new(base.clone())
             .invoke(map(
                 json!({"file": "a/b.txt", "search": "fo+", "replace": "X"}),
             ))
             .await
             .unwrap();
-        assert_eq!(r["occurrences"], 2);
+        assert_eq!(
+            r,
+            json!({"file": "a/b.txt", "replaced": false, "occurrences": 0})
+        );
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "foo foo bar 日本");
+
+        let r = StrReplaceTool::new(base)
+            .invoke(map(
+                json!({"file": "a/b.txt", "search": "foo", "replace": "X"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            json!({"file": "a/b.txt", "replaced": true, "occurrences": 2})
+        );
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "X X bar 日本");
 
         let v = ViewTool::default()
@@ -606,26 +554,83 @@ mod tests {
         assert_eq!(v["content"], "X X bar 日本");
     }
 
-    #[test]
-    fn js_replacement_semantics() {
-        let r =
-            |pat: &str, hay: &str, rep: &str| js_replace_all(&Regex::new(pat).unwrap(), hay, rep);
-        // 存在しないグループ参照や名前付き参照は文字どおり残る（JS と同じ）
-        assert_eq!(r("foo", "x foo y", "${bar}"), "x ${bar} y");
-        assert_eq!(r("foo", "x foo y", "cost: $price"), "x cost: $price y");
-        assert_eq!(r("foo", "x foo y", "$1a"), "x $1a y");
-        assert_eq!(r("foo", "x foo y", "<$<n>>"), "x <$<n>> y");
-        assert_eq!(r("foo", "x foo y", "$"), "x $ y");
-        // 特殊パターン
-        assert_eq!(r("foo", "x foo y", "[$&]"), "x [foo] y");
-        assert_eq!(r("foo", "x foo y", "$$"), "x $ y");
-        assert_eq!(r("o", "ab o cd", "$`|$'"), "ab ab | cd cd");
-        // グループ参照
-        assert_eq!(r("(f)(o)o", "x foo y", "$2$1"), "x of y");
-        assert_eq!(r("(f)", "f", "$10"), "f0");
-        assert_eq!(r("(?<w>o+)", "foo", "[$<w>]"), "f[oo]");
-        assert_eq!(r("(a)|(b)", "b", "[$1]"), "[]");
-        assert_eq!(r("日", "日本", "$&語"), "日語本");
+    // --- StrReplaceTool (literal replace)。TS tests/agents/codegen-agent.test.ts の移植 ---
+
+    async fn str_replace_run(content: &str, search: &str, replace: &str) -> (Value, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("target.txt");
+        std::fs::write(&file, content).unwrap();
+        let f = file.to_string_lossy().into_owned();
+        let res = StrReplaceTool::new(None)
+            .invoke(map(
+                json!({"file": f, "search": search, "replace": replace}),
+            ))
+            .await
+            .unwrap();
+        let after = std::fs::read_to_string(&file).unwrap();
+        // file は入力のまま返す
+        assert_eq!(res["file"], json!(f));
+        (res, after)
+    }
+
+    #[tokio::test]
+    async fn str_replace_dot_is_literal() {
+        let (res, after) = str_replace_run("a.b axb a.b", "a.b", "Z").await;
+        assert_eq!(after, "Z axb Z");
+        assert_eq!(res["replaced"], true);
+        assert_eq!(res["occurrences"], 2);
+    }
+
+    #[tokio::test]
+    async fn str_replace_regex_metachars_do_not_error() {
+        let (res, after) = str_replace_run("call foo(1); foo(2)", "foo(", "bar(").await;
+        assert_eq!(after, "call bar(1); bar(2)");
+        assert_eq!(res["occurrences"], 2);
+
+        let (res, after) = str_replace_run("arr[x] = x", "[x]", "[y]").await;
+        assert_eq!(after, "arr[y] = x");
+        assert_eq!(res["occurrences"], 1);
+    }
+
+    #[tokio::test]
+    async fn str_replace_dollar_patterns_are_literal() {
+        let (_, after) = str_replace_run("price", "price", "$1").await;
+        assert_eq!(after, "$1");
+        let (_, after) = str_replace_run("price", "price", "$&$&").await;
+        assert_eq!(after, "$&$&");
+    }
+
+    #[tokio::test]
+    async fn str_replace_no_match_does_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("target.txt");
+        std::fs::write(&file, "unchanged").unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let f = file.to_string_lossy().into_owned();
+
+        let res = StrReplaceTool::new(None)
+            .invoke(map(json!({"file": f, "search": "nomatch", "replace": "X"})))
+            .await
+            .unwrap();
+
+        assert_eq!(res, json!({"file": f, "replaced": false, "occurrences": 0}));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "unchanged");
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), old);
+    }
+
+    #[tokio::test]
+    async fn str_replace_empty_search_is_no_match() {
+        // TS: search === '' なら [content] として 0 件扱い
+        let (res, after) = str_replace_run("abc", "", "X").await;
+        assert_eq!(after, "abc");
+        assert_eq!(res["replaced"], false);
+        assert_eq!(res["occurrences"], 0);
     }
 
     #[tokio::test]
@@ -668,14 +673,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn lint_tool_parses_stdout_and_stderr() {
+        let r = LintTool::default()
+            .invoke(map(json!({
+                "command": "echo a.py:1:2: E1 out&& echo b.py:3:4: W2 err 1>&2"
+            })))
+            .await
+            .unwrap();
+        let issues = r["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), 2, "{r}");
+        assert_eq!(issues[0]["file"], "a.py");
+        assert_eq!(issues[0]["rule"], "E1");
+        assert_eq!(issues[1]["file"], "b.py");
+        assert_eq!(issues[1]["rule"], "W2");
+        assert_eq!(issues[1]["type"], "warning");
+    }
+
     #[test]
     fn lint_parsing() {
         let issues = parse_lint_output("ok\nfoo error x\nbar warning y\n");
         assert_eq!(
             issues,
             vec![
-                json!({"type": "error", "message": "foo error x"}),
-                json!({"type": "warning", "message": "bar warning y"}),
+                json!({"type": "error", "message": "foo error x", "tool": "generic", "language": "unknown"}),
+                json!({"type": "warning", "message": "bar warning y", "tool": "generic", "language": "unknown"}),
             ]
         );
     }

@@ -75,14 +75,22 @@ impl ReviewAgent {
     }
 
     pub fn with_config(config: SubagentConfig) -> Self {
+        Self::with_tools(config, Self::default_tools())
+    }
+
+    /// 既定のツール（view / bash_tool(lint)）
+    pub fn default_tools() -> Vec<Arc<dyn Tool>> {
+        vec![Arc::new(ViewTool::default()), Arc::new(LintTool::default())]
+    }
+
+    /// ツールを差し替えて作る（テストでモックツールを渡す用）
+    pub fn with_tools(config: SubagentConfig, tools: Vec<Arc<dyn Tool>>) -> Self {
         let policy = config
             .behavior
             .retry_policy
             .clone()
             .or_else(|| Self::default_config().behavior.retry_policy)
             .expect("default retry policy");
-        let tools: Vec<Arc<dyn Tool>> =
-            vec![Arc::new(ViewTool::default()), Arc::new(LintTool::default())];
         let base = AgentBase::new(config, tools);
         let retry_manager = RetryManager::new(policy, base.logger.clone());
         let error_handler = ErrorHandler::new(
