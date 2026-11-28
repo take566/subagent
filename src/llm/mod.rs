@@ -29,7 +29,7 @@ pub use fake::ReplayLlm;
 pub use fake::ScriptedLlm;
 pub use runner::{
     ConversationRunner, DEFAULT_MAX_TOKENS_CEILING, RunObserver, RunOutcome, RunStop, RunnerLimits,
-    ToolHandler,
+    ToolHandler, estimate_request_tokens,
 };
 pub use settings::{
     AgentKind, AgentLlm, AgentLlmSettings, LLM_BACKEND_ENV, LLM_REPLAY_FILE_ENV, LlmBackend,

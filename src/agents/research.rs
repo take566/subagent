@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::llm::{AgentKind, AgentLlm, AgentLlmSettings, LlmClient};
 use crate::tools::{DocumentParserTool, WebFetchTool, WebSearchTool, js_display};
 use crate::types::{
-    Backoff, BehaviorConfig, ErrorAction, ErrorHandlingStrategy, InterfaceConfig, JsonMap,
+    Backoff, BehaviorConfig, ErrorAction, ErrorHandlingStrategy, InterfaceConfig,
     ParameterDefinition, RetryPolicy, RoleConfig, SubagentConfig, Task, TaskResult,
     ToolAlternative, js_substring,
 };
@@ -17,6 +17,11 @@ use async_trait::async_trait;
 use rmcp::model::Tool as McpTool;
 use serde_json::{Value, json};
 use std::sync::Arc;
+
+mod llm;
+mod output;
+
+pub use output::{Citation, ResearchResult, SearchError, Source, UNTRUSTED_TAG};
 
 pub struct ResearchAgent {
     base: AgentBase,
@@ -211,13 +216,13 @@ impl Subagent for ResearchAgent {
         ))
     }
 
-    /// 3a の仮実装: 引数を既存の `execute` に写す（LLM が未設定ならエラー）。3d で置き換える
-    async fn call_typed(&self, args: Value, _ctx: CallCtx) -> Result<Value> {
-        let mut p = JsonMap::new();
-        common::copy_arg(&args, "query", &mut p, "query");
-        common::copy_arg(&args, "depth", &mut p, "depth");
+    /// LLM（web_search / web_fetch の server tool）で調べ、[`ResearchResult`] を返す。
+    /// LLM が未設定なら送らずに [`crate::llm::LlmError::NotConfigured`]
+    async fn call_typed(&self, args: Value, ctx: CallCtx) -> Result<Value> {
         self.llm.ensure_configured()?;
-        common::task_value(self.execute(common::typed_task("research", p)).await?)
+        let args = llm::Args::parse(&args)?;
+        let result = llm::research(&self.llm, &args, ctx).await?;
+        Ok(serde_json::to_value(result)?)
     }
 
     async fn execute(&self, task: Task) -> Result<TaskResult> {

@@ -836,6 +836,10 @@ fn replay_backend_serves_typed_tools() {
         env!("CARGO_MANIFEST_DIR")
     );
     for (agent, bin) in all_bins() {
+        // research は空の記録では答えられない（LLM の経路。tests/research_agent.rs の replay_fixture_succeeds）
+        if agent == "research" {
+            continue;
+        }
         let dir = tempfile::tempdir().unwrap();
         let mut c = Client::spawn_rooted(
             bin,
