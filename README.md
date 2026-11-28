@@ -154,14 +154,14 @@ LLM が未設定（鍵が無い）なら typed tool は mock の結果を返さ�
 
 `execute`（`full` のみ）の引数は `action`（必須、空でない文字列）、`task_id`（任意、空でない文字列。省略時は `task-<uuid>`）、`parameters`（任意、object）です。型が違うと `Error: Invalid arguments: ...` を返します。
 
-1 回の tools/call は、request を受けた時から `SUBAGENT_DEADLINE_SECS` 秒（既定 540）で打ち切って `Error: Deadline exceeded ...` を返します（`MAX_CONCURRENT` の待ちも含みます）。client の `notifications/cancelled` でも打ち切ります。request の `_meta.progressToken` があれば `notifications/progress` を送ります（開始・LLM との往復ごと・終了。`progress` は 1 ずつ増え、終了の通知だけ `total` が付き、応答より前に届きます。応答の後には送りません）。
+1 回の tools/call は、request を受けた時から `SUBAGENT_DEADLINE_SECS` 秒（既定 540）で打ち切って `Error: Deadline exceeded ...` を返します（`MAX_CONCURRENT` の待ちも含みます）。client の `notifications/cancelled` でも打ち切ります（実行中の子プロセスも止め、取り消した request には応答も進捗も送りません）。request の `_meta.progressToken` があれば `notifications/progress` を送ります（開始・LLM との往復ごと・終了。`progress` は 1 ずつ増え、終了の通知だけ `total` が付き、応答より前に届きます。応答の後には送りません。通知を 2 秒以内に送れない時はその通知を諦め、呼び出しは止めません）。
 
 | 環境変数 | 意味 |
 |---|---|
 | `AGENT_ID` | エージェントの id を上書きする（前後の空白は除く。空なら既定の id） |
 | `MAX_CONCURRENT` | tools/call の同時実行数の上限。正の整数のときだけ有効で、未設定・不正値は無制限 |
 | `SUBAGENT_MCP_MODE` | `hermes`（既定）か `full`。上を参照。`full` 以外は `hermes` |
-| `SUBAGENT_DEADLINE_SECS` | 1 回の tools/call の deadline（秒、既定 540）。正の整数以外は既定値。エージェントの `behavior.timeout` を設定した場合は短い方 |
+| `SUBAGENT_DEADLINE_SECS` | 1 回の tools/call の deadline（秒、既定 540）。1〜86400 の整数でなければ（`abc`・`300s`・`0` など）起動しません（exit code 2）。エージェントの `behavior.timeout` を設定した場合は短い方 |
 | `SUBAGENT_ANTHROPIC_API_KEY`（無ければ `ANTHROPIC_API_KEY`） | Claude API の鍵。無ければ LLM は未設定（通信しない）。値はログ・エラーに出しません |
 | `SUBAGENT_MAX_TOKENS_PER_DAY` | 1 日（UTC）の token 上限（既定 2000000）。**server process ごと**の上限です（4 つの server はそれぞれ別に数えます。全体を抑えるには server ごとに設定します） |
 | `SUBAGENT_LLM_BACKEND` | 未設定・空・`anthropic` は Claude API。`replay` は `--features replay` で build した bin だけ（記録した応答を返すテスト用）。それ以外の値と、feature なしの bin の `replay` では起動しません（exit code 2） |
@@ -169,7 +169,7 @@ LLM が未設定（鍵が無い）なら typed tool は mock の結果を返さ�
 | `SUBAGENT_MODEL` / `SUBAGENT_<AGENT>_MODEL` | model（既定 `claude-opus-5-5`）。`<AGENT>` は `RESEARCH` / `CODEGEN` / `REVIEW` / `DOCUMENT` で、エージェント名付きが優先 |
 | `SUBAGENT_EFFORT` / `SUBAGENT_<AGENT>_EFFORT` | `low` / `medium` / `high` / `xhigh` / `max`（既定は送らない）。不正な値では起動しません |
 | `SUBAGENT_TOKEN_BUDGET` / `SUBAGENT_<AGENT>_TOKEN_BUDGET` | 1 タスクの token 予算（正の整数。既定 research 300000 / codegen 1000000 / review 100000 / document 100000）。不正な値では起動しません |
-| `SUBAGENT_REVIEW_LINT_COMMAND` | review の typed tool で `lint: true` のときに実行するコマンド（`bash_tool` と同じ allowlist を通ります）。未設定で `lint: true` ならエラー |
+| `SUBAGENT_REVIEW_LINT_COMMAND` | review の typed tool で `lint: true` のときに実行するコマンド（例 `cargo clippy`）。`bash_tool` と同じ allowlist を通るので、**その program を review-server の `SUBAGENT_CODEGEN_ALLOWED_COMMANDS` にも入れてください**（入っていなければ lint は実行されず、warn を出して lint 無しで続けます）。未設定で `lint: true` ならエラー |
 | `SUBAGENT_ROOTS` | **必須**（ファイル・コマンドのツールを使う場合）。workspace の root の絶対パス。複数なら OS の path 区切り（Windows は `;`、それ以外は `:`）で並べ、相対パスは最初の root 基準。未設定ならツールは拒否する |
 | `SUBAGENT_MAX_FILE_BYTES` | 1 ファイルの上限（既定 1048576 byte）。超えるファイルは読まず、書かない |
 | `SUBAGENT_MAX_FILES` | 1 タスクで書き込むファイル数の上限（既定 200）。エージェントのタスク（`execute`）と direct tool の呼び出しごとに数え直す |

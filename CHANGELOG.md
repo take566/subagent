@@ -5,8 +5,8 @@
 ### Phase 3a（エージェントを LLM につなぐ土台）
 - MCP の `SUBAGENT_MCP_MODE`: 既定の `hermes` は各 server の typed tool（`research` / `codegen` / `review` / `document`）だけを公開し、direct tool と `execute` の呼び出しを拒否する。`full` 以外の値は `hermes`（fail closed）。**既定の挙動の変更**: 従来のツールを使うには `SUBAGENT_MCP_MODE=full`
 - typed tool（inputSchema は `additionalProperties: false` と `required`。server 側でも検証して `Error: Invalid arguments: ...`）。今は引数を既存の `execute` に写す仮実装で、LLM が未設定なら mock の結果を返さずに `LLM is not configured` の isError
-- `SUBAGENT_DEADLINE_SECS`（既定 540）: request を受けた時から数えて tools/call を打ち切る（同時実行数の待ちを含む）。client の `notifications/cancelled` でも打ち切る。エージェントの `behavior.timeout` は既定で無くなり（以前は 30〜120 秒、使われていなかった）、設定した時だけ deadline を縮める
-- `notifications/progress`: `_meta.progressToken` 付きの request に開始・runner の往復ごと・終了を送る（1 ずつ増える。終了は応答の前、応答の後は送らない）
+- `SUBAGENT_DEADLINE_SECS`（既定 540）: request を受けた時から数えて tools/call を打ち切る（同時実行数の待ちを含む）。1〜86400 の整数でなければ起動しない（exit code 2）。client の `notifications/cancelled` でも打ち切る（取り消した request には応答も進捗も送らない）。エージェントの `behavior.timeout` は既定で無くなり（以前は 30〜120 秒、使われていなかった）、設定した時だけ deadline を縮める
+- `notifications/progress`: `_meta.progressToken` 付きの request に開始・runner の往復ごと・終了を送る（1 ずつ増える。終了は応答の前、応答の後は送らない。開始・終了の通知は 2 秒で諦める）
 - `Subagent::typed_tool` / `Subagent::call_typed` と `core::CallCtx`（deadline / `ProgressSink` / `CancellationToken`）、`core::ProgressNotifier`
 - `llm::RunObserver` と `ConversationRunner::with_observer`（往復ごとに呼ぶ）
 - `llm::AgentLlmSettings`（model / max_tokens / effort / token_budget / max_iterations / cache。エージェントごとの既定と `SUBAGENT_[<AGENT>_]MODEL` / `_EFFORT` / `_TOKEN_BUDGET`）、`llm::AgentLlm`、`llm::AgentKind`

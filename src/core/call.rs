@@ -9,6 +9,7 @@
 //! - `cancel`: client の `notifications/cancelled` で cancel される。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -24,21 +25,19 @@ pub trait ProgressNotifier: Send + Sync {
     async fn notify(&self, progress: f64, total: Option<f64>, message: Option<String>);
 }
 
-struct SinkState {
-    last: u64,
-    closed: bool,
-}
-
 struct SinkInner {
     notifier: Arc<dyn ProgressNotifier>,
-    state: Mutex<SinkState>,
+    /// finish / close が始まったら立つ（lock を待たずに以後の report を止める）
+    closing: AtomicBool,
+    /// 最後に振った番号。番号を振ってから送り終えるまで持つ
+    last: Mutex<u64>,
 }
 
 /// 進捗の送り先。clone は同じ counter を共有する。
 ///
 /// - [`ProgressSink::none`]（token が無い request）は何も送らない
 /// - 送る値は 1, 2, 3, ... と増え続ける（並行に呼んでも順に送る）
-/// - [`ProgressSink::finish`] の後は何も送らない（応答の後に通知が届かない）
+/// - [`ProgressSink::finish`] / [`ProgressSink::close`] の後は何も送らない（応答の後に通知が届かない）
 #[derive(Clone, Default)]
 pub struct ProgressSink(Option<Arc<SinkInner>>);
 
@@ -59,10 +58,8 @@ impl ProgressSink {
     pub fn new(notifier: Arc<dyn ProgressNotifier>) -> Self {
         Self(Some(Arc::new(SinkInner {
             notifier,
-            state: Mutex::new(SinkState {
-                last: 0,
-                closed: false,
-            }),
+            closing: AtomicBool::new(false),
+            last: Mutex::new(0),
         })))
     }
 
@@ -73,30 +70,44 @@ impl ProgressSink {
 
     /// 進捗を 1 つ送る（終了後と sink が無い時は何もしない）
     pub async fn report(&self, message: impl Into<String>) {
-        self.send(message.into(), false).await;
-    }
-
-    /// 最後の進捗を送り、以後の [`Self::report`] を捨てる。応答を返す前に server が呼ぶ
-    pub async fn finish(&self, message: impl Into<String>) {
-        self.send(message.into(), true).await;
-    }
-
-    async fn send(&self, message: String, last: bool) {
         let Some(inner) = &self.0 else { return };
-        // 番号を振ってから送るまで lock を持つ（送る順と番号の順を揃える）
-        let mut state = inner.state.lock().await;
-        if state.closed {
+        if inner.closing.load(Ordering::SeqCst) {
             return;
         }
-        state.last += 1;
-        let progress = state.last as f64;
-        if last {
-            state.closed = true;
+        // 番号を振ってから送るまで lock を持つ（送る順と番号の順を揃える）
+        let mut last = inner.last.lock().await;
+        if inner.closing.load(Ordering::SeqCst) {
+            return;
         }
+        *last += 1;
+        let progress = *last as f64;
         inner
             .notifier
-            .notify(progress, last.then_some(progress), Some(message))
+            .notify(progress, None, Some(message.into()))
             .await;
+    }
+
+    /// 最後の進捗（`total` 付き）を送り、以後の [`Self::report`] を捨てる。応答を返す前に server が呼ぶ。
+    /// 先に閉じるので、途中で future を捨てても（timeout）以後の進捗は送らない
+    pub async fn finish(&self, message: impl Into<String>) {
+        let Some(inner) = &self.0 else { return };
+        if inner.closing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let mut last = inner.last.lock().await;
+        *last += 1;
+        let progress = *last as f64;
+        inner
+            .notifier
+            .notify(progress, Some(progress), Some(message.into()))
+            .await;
+    }
+
+    /// 何も送らずに閉じる（client が取り消した時）。送っている途中の通知があれば終わるまで待つ
+    pub async fn close(&self) {
+        let Some(inner) = &self.0 else { return };
+        inner.closing.store(true, Ordering::SeqCst);
+        drop(inner.last.lock().await);
     }
 }
 
@@ -145,6 +156,37 @@ mod tests {
             tokio::task::yield_now().await;
             self.0.lock().unwrap().push((progress, total, message));
         }
+    }
+
+    #[tokio::test]
+    async fn close_sends_nothing_and_stops_later_reports() {
+        let rec = Arc::new(Rec::default());
+        let s = ProgressSink::new(rec.clone());
+        s.report("a").await;
+        s.close().await;
+        s.report("b").await;
+        s.finish("c").await;
+        let got = rec.0.lock().unwrap().clone();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].2.as_deref(), Some("a"));
+    }
+
+    /// finish の送信を途中で捨てても（timeout）、以後の report は送らない
+    #[tokio::test(start_paused = true)]
+    async fn abandoned_finish_still_closes() {
+        struct Slow(StdMutex<u32>);
+        #[async_trait]
+        impl ProgressNotifier for Slow {
+            async fn notify(&self, _: f64, _: Option<f64>, _: Option<String>) {
+                tokio::time::sleep(std::time::Duration::from_secs(100)).await;
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+        let slow = Arc::new(Slow(StdMutex::new(0)));
+        let s = ProgressSink::new(slow.clone());
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), s.finish("x")).await;
+        s.report("late").await;
+        assert_eq!(*slow.0.lock().unwrap(), 0);
     }
 
     #[tokio::test]

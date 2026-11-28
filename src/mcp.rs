@@ -9,7 +9,7 @@
 //! - `AGENT_ID`: 指定があれば agent の id を上書きする（前後の空白は除く、空なら無視）
 //! - `MAX_CONCURRENT`: tools/call の同時実行数の上限（正の整数。未設定・不正値は無制限）
 //! - `SUBAGENT_MCP_MODE`: 上の mode（前後の空白と大文字小文字は問わない）
-//! - `SUBAGENT_DEADLINE_SECS`: 1 回の tools/call の deadline（正の整数の秒。既定 540）。
+//! - `SUBAGENT_DEADLINE_SECS`: 1 回の tools/call の deadline（1〜86400 の整数の秒。既定 540。それ以外は起動しない）。
 //!   request を受けた時から数える（同時実行数の待ちも含む）。agent の `behavior.timeout`
 //!   があれば短い方を使う
 //!
@@ -43,6 +43,15 @@ pub const MCP_MODE_ENV: &str = "SUBAGENT_MCP_MODE";
 pub const DEADLINE_ENV: &str = "SUBAGENT_DEADLINE_SECS";
 /// deadline の既定（秒）
 pub const DEFAULT_DEADLINE_SECS: u64 = 540;
+/// deadline の上限（秒、1 日）。これより大きい値は設定エラー
+pub const MAX_DEADLINE_SECS: u64 = 86_400;
+/// 開始・終了・取り消しの進捗通知を送るのを待つ上限（stdout が詰まっても呼び出しを止めない）
+const PROGRESS_NOTIFY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// MCP の env の設定エラー（bin は起動しない）
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct McpEnvError(pub String);
 
 /// 公開するツールの範囲
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -97,12 +106,14 @@ impl Default for McpEnv {
 
 impl McpEnv {
     /// プロセスの環境変数から読む
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, McpEnvError> {
         Self::from_lookup(|k| std::env::var(k).ok())
     }
 
-    /// 任意の参照関数から読む（テスト用）
-    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
+    /// 任意の参照関数から読む（テスト用）。
+    ///
+    /// `SUBAGENT_DEADLINE_SECS` が 1〜86400 の整数でなければエラー（未設定・空は既定の 540）
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, McpEnvError> {
         let agent_id = get("AGENT_ID")
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
@@ -111,16 +122,27 @@ impl McpEnv {
             .and_then(|v| parse_int_prefix(&v))
             .filter(|n| *n > 0)
             .and_then(|n| usize::try_from(n).ok());
-        let deadline = get(DEADLINE_ENV)
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_DEADLINE_SECS);
-        McpEnv {
+        let deadline = match get(DEADLINE_ENV)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        {
+            None => DEFAULT_DEADLINE_SECS,
+            Some(raw) => raw
+                .parse::<u64>()
+                .ok()
+                .filter(|n| (1..=MAX_DEADLINE_SECS).contains(n))
+                .ok_or_else(|| {
+                    McpEnvError(format!(
+                        "{DEADLINE_ENV} must be an integer number of seconds between 1 and {MAX_DEADLINE_SECS}"
+                    ))
+                })?,
+        };
+        Ok(McpEnv {
             agent_id,
             max_concurrent,
             mode: McpMode::parse(get(MCP_MODE_ENV).as_deref()),
             deadline: Duration::from_secs(deadline),
-        }
+        })
     }
 
     /// `AGENT_ID` を config に反映する（TS の `subagent.setId`）。
@@ -228,7 +250,11 @@ impl McpServer {
         if let Some(ms) = self.subagent.get_config().behavior.timeout {
             d = d.min(Duration::from_millis(ms));
         }
-        received + d
+        // 加算があふれる（with_deadline に巨大な値を渡した）時は遠い未来に飽和させる
+        received
+            .checked_add(d)
+            .or_else(|| received.checked_add(Duration::from_secs(MAX_DEADLINE_SECS * 365 * 30)))
+            .unwrap_or(received)
     }
 
     fn typed_tool(&self) -> Option<McpTool> {
@@ -297,7 +323,12 @@ impl McpServer {
         progress: ProgressSink,
     ) -> CallToolResult {
         let deadline = self.deadline_from(received);
-        progress.report(format!("started {name}")).await;
+        // 通知が詰まっても呼び出しを止めない（送れなければその通知は諦める）
+        let _ = tokio::time::timeout(
+            PROGRESS_NOTIFY_TIMEOUT,
+            progress.report(format!("started {name}")),
+        )
+        .await;
         let ctx = CallCtx {
             deadline,
             progress: progress.clone(),
@@ -307,7 +338,9 @@ impl McpServer {
             biased;
             _ = cancel.cancelled() => {
                 self.logger.warn("Tool call cancelled", Some(&json!({ "tool": name })));
-                error_result("Request cancelled")
+                // 取り消した client には、終了も含めてもう何も送らない
+                let _ = tokio::time::timeout(PROGRESS_NOTIFY_TIMEOUT, progress.close()).await;
+                return error_result("Request cancelled");
             }
             r = tokio::time::timeout_at(deadline, self.dispatch(name, args, ctx)) => match r {
                 Ok(r) => r,
@@ -324,9 +357,13 @@ impl McpServer {
             },
         };
         let failed = result.is_error == Some(true);
-        progress
-            .finish(if failed { "failed" } else { "completed" })
-            .await;
+        // 送れなくても（stdout が詰まっても）応答は返す。finish は送る前に sink を閉じるので、
+        // 諦めた後の進捗も届かない
+        let _ = tokio::time::timeout(
+            PROGRESS_NOTIFY_TIMEOUT,
+            progress.finish(if failed { "failed" } else { "completed" }),
+        )
+        .await;
         result
     }
 
@@ -508,7 +545,7 @@ where
     A: Subagent + 'static,
     F: FnOnce(SubagentConfig, Arc<dyn LlmClient>, AgentLlmSettings) -> A,
 {
-    let env = McpEnv::from_env();
+    let env = McpEnv::from_env().unwrap_or_else(|e| exit_config_error(label, &e));
     let mut config = config;
     env.apply_to(&mut config);
     let client = llm::client_from_env().unwrap_or_else(|e| exit_config_error(label, &e));
@@ -639,7 +676,7 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        McpEnv::from_lookup(|k| m.get(k).cloned())
+        McpEnv::from_lookup(|k| m.get(k).cloned()).unwrap()
     }
 
     /// TS の `new MCPServer(agent, env)` 相当: env を反映して agent と server を作る（mode は full）
@@ -717,12 +754,27 @@ mod tests {
 
     #[test]
     fn deadline_parsing() {
-        let d = |v: &str| env(&[(DEADLINE_ENV, v)]).deadline;
+        let parse = |v: &str| {
+            let m: HashMap<String, String> = [(DEADLINE_ENV.to_string(), v.to_string())].into();
+            McpEnv::from_lookup(|k| m.get(k).cloned()).map(|e| e.deadline)
+        };
         assert_eq!(env(&[]).deadline, Duration::from_secs(540));
-        assert_eq!(d("30"), Duration::from_secs(30));
-        assert_eq!(d(" 60 "), Duration::from_secs(60));
-        for v in ["0", "-5", "abc", "1.5", ""] {
-            assert_eq!(d(v), Duration::from_secs(540), "{v:?}");
+        assert_eq!(parse("").unwrap(), Duration::from_secs(540));
+        assert_eq!(parse("30").unwrap(), Duration::from_secs(30));
+        assert_eq!(parse(" 60 ").unwrap(), Duration::from_secs(60));
+        assert_eq!(parse("86400").unwrap(), Duration::from_secs(86_400));
+        for v in [
+            "0",
+            "-5",
+            "abc",
+            "300s",
+            "1.5",
+            "86401",
+            "18446744073709551615",
+            "99999999999999999999999",
+        ] {
+            let e = parse(v).unwrap_err();
+            assert!(e.to_string().contains(DEADLINE_ENV), "{v:?}: {e}");
         }
     }
 
@@ -884,6 +936,88 @@ mod tests {
         // agent が応答の後に送ろうとした進捗は届かない
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(*rec.0.lock().unwrap(), at_response);
+    }
+
+    /// 巨大な deadline でも Instant の加算で panic せず、飽和させて普通に返す
+    #[tokio::test]
+    async fn huge_deadline_saturates_instead_of_panicking() {
+        let (server, _) = server_from(&[], config());
+        let server = server.with_deadline(Duration::from_secs(u64::MAX));
+        let r = call_fake(&server, json!({ "q": "x" })).await;
+        assert!(r.get("isError").is_none_or(|v| v == false), "{r}");
+    }
+
+    /// client が取り消した後は、終了の通知も含めて何も送らない
+    #[tokio::test(start_paused = true)]
+    async fn no_progress_after_cancel() {
+        let (server, _) = server_from(&[], config());
+        let rec = Arc::new(RecordedProgress::default());
+        let cancel = CancellationToken::new();
+        let c2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            c2.cancel();
+        });
+        let r = as_json(
+            &server
+                .handle_call(
+                    "fake",
+                    json!({ "q": "x", "sleep_secs": 1000, "late_progress": true })
+                        .as_object()
+                        .cloned(),
+                    Instant::now(),
+                    cancel,
+                    ProgressSink::new(rec.clone()),
+                )
+                .await,
+        );
+        assert_eq!(r["isError"], true, "{r}");
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let messages: Vec<String> = rec
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.2.clone().unwrap_or_default())
+            .collect();
+        // cancel（3 秒後）より前に送ったものだけ。late（1 秒後）は cancel 前なので届く
+        assert_eq!(
+            messages,
+            ["started fake", "working", "late"],
+            "{messages:?}"
+        );
+    }
+
+    /// 通知を送れない（stdout が詰まった）時も、deadline を大きく過ぎて呼び出しを止めない
+    #[tokio::test(start_paused = true)]
+    async fn stuck_progress_does_not_hold_the_call_past_its_deadline() {
+        struct Stuck;
+        #[async_trait]
+        impl ProgressNotifier for Stuck {
+            async fn notify(&self, _: f64, _: Option<f64>, _: Option<String>) {
+                tokio::time::sleep(Duration::from_secs(100_000)).await;
+            }
+        }
+        let (server, _) = server_from(&[(DEADLINE_ENV, "5")], config());
+        let started = Instant::now();
+        let r = as_json(
+            &server
+                .handle_call(
+                    "fake",
+                    json!({ "q": "x" }).as_object().cloned(),
+                    Instant::now(),
+                    CancellationToken::new(),
+                    ProgressSink::new(Arc::new(Stuck)),
+                )
+                .await,
+        );
+        assert!(r.get("content").is_some(), "{r}");
+        // 開始 2 秒 + deadline 5 秒（agent の進捗は deadline の中）+ 終了 2 秒 まで
+        assert!(
+            started.elapsed() <= Duration::from_secs(9),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -85,6 +85,8 @@ struct Client {
     non_json_lines: Vec<String>,
     /// 受け取った通知（method と params）
     notifications: Vec<Value>,
+    /// 待っていた id 以外の応答
+    other_responses: Vec<Value>,
 }
 
 impl Client {
@@ -116,6 +118,7 @@ impl Client {
             next_id: 0,
             non_json_lines: vec![],
             notifications: vec![],
+            other_responses: vec![],
         }
     }
 
@@ -180,7 +183,7 @@ impl Client {
                 Ok(msg) if msg.get("id").is_none() && msg.get("method").is_some() => {
                     self.notifications.push(msg);
                 }
-                Ok(_) => {}
+                Ok(msg) => self.other_responses.push(msg),
                 Err(_) => self.non_json_lines.push(line.to_string()),
             }
         }
@@ -744,6 +747,71 @@ fn replay_backend_without_feature_exits_non_zero() {
 }
 
 /// 不正な per-agent の設定でも起動しない
+/// 不正・0・大きすぎる（> 86400）deadline では起動しない（以前は u64::MAX で Instant の加算が panic した）
+#[test]
+fn invalid_deadline_exits_non_zero() {
+    for v in ["abc", "300s", "0", "-1", "86401", "18446744073709551615"] {
+        let (status, stderr) = spawn_expect_exit(
+            env!("CARGO_BIN_EXE_review-server"),
+            &[("SUBAGENT_DEADLINE_SECS", v)],
+        );
+        assert!(!status.success(), "{v}: {status}");
+        assert!(stderr.contains("SUBAGENT_DEADLINE_SECS"), "{v}: {stderr}");
+    }
+}
+
+#[cfg(windows)]
+const SLOW: (&str, &str) = ("ping", "ping -n 30 127.0.0.1");
+#[cfg(not(windows))]
+const SLOW: (&str, &str) = ("sleep", "sleep 30");
+
+/// `notifications/cancelled` で実行中の tools/call を止める: 応答は返さず、同時実行数の枠も
+/// すぐ空く（MAX_CONCURRENT=1 なので、止まらなければ次の呼び出しは 30 秒待つ）
+#[test]
+fn cancelled_request_frees_the_slot_and_gets_no_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Client::spawn_rooted(
+        env!("CARGO_BIN_EXE_codegen-server"),
+        dir.path(),
+        &[
+            FULL,
+            ("MAX_CONCURRENT", "1"),
+            ("SUBAGENT_CODEGEN_ALLOWED_COMMANDS", SLOW.0),
+        ],
+    );
+    c.initialize();
+    c.next_id += 1;
+    let slow_id = c.next_id;
+    c.send(
+        json!({ "jsonrpc": "2.0", "id": slow_id, "method": "tools/call",
+        "params": { "name": "bash_tool", "arguments": { "command": SLOW.1 } } }),
+    );
+    // 実行が始まってから取り消す
+    std::thread::sleep(Duration::from_secs(2));
+    c.send(
+        json!({ "jsonrpc": "2.0", "method": "notifications/cancelled",
+        "params": { "requestId": slow_id, "reason": "test" } }),
+    );
+    let started = Instant::now();
+    let (err, text) = c.call("file_create", json!({ "path": "a.txt", "content": "x" }));
+    assert!(!err, "{text}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the cancelled call kept the slot: {:?}",
+        started.elapsed()
+    );
+    // 少し待ってから、取り消した呼び出しの応答が来ていないことを確かめる
+    std::thread::sleep(Duration::from_secs(1));
+    c.request("ping", json!({}));
+    assert!(
+        c.other_responses
+            .iter()
+            .all(|m| m.get("id") != Some(&json!(slow_id))),
+        "{:?}",
+        c.other_responses
+    );
+}
+
 #[test]
 fn invalid_agent_llm_settings_exit_non_zero() {
     for (envs, needle) in [
