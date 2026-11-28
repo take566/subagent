@@ -1,7 +1,7 @@
 //! Code Generation Agent 実装
 //!
 //! typed tool `codegen`（[`Subagent::call_typed`]）は Claude に `text_editor_20250728`
-//! （[`editor::EditorTools`]、Workspace の中だけ）でコードを書かせる。
+//! （`editor::EditorTools`、Workspace の中だけ）でコードを書かせる。
 //! `execute`（`full` mode）は従来の mock のまま。
 
 mod editor;
