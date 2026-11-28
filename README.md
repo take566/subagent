@@ -237,7 +237,7 @@ Claude（既定 `claude-opus-5-5`、max_tokens 32000）に 1 回だけ聞いて�
 - `score` は従来の決定的な計算（100 − error×10 − warning×2 − 提案の数、0〜100）。数えるのは Claude の指摘・従来の heuristics（大きすぎるファイル、コメントの少なさ）と、`path` で渡した時だけ lint の指摘
 - `lint: true` は `SUBAGENT_REVIEW_LINT_COMMAND` を workspace の root で実行します（`code` で渡した場合もそのコードではなく workspace を lint するので、lint の指摘は `lint.issues` に返すだけで score には数えません）。終了コードが 0 以外でも結果（`lint.success: false`）として扱い、allowlist に無い・起動できない場合は `lint_error` を返します
 - 応答: `{score, issues, suggestions, summary, lint?: {command, success, timed_out, truncated, issues}, lint_error?, tokens_used, stop_reason}`。拒否（refusal）・max_tokens・不正な JSON・deadline・token 予算（既定 150000）・取り消しは isError
-- 既知の限界: 送る前の予算の確認（runner の pre-send check、Phase 3d）が入るまでは、review の token 予算は応答を受け取った後に数えるだけです（1 往復なので、1 回の呼び出しは予算を超えて使いうる）
+- token 予算は送る前に確かめます（上の「送る前の token 予算の確認」。request の概算 + max_tokens が残りの予算より多ければ送らずにエラー）。概算なので、1 回の request が予算を超えることはあります
 
 ### Review エージェントの lint
 
@@ -247,7 +247,7 @@ Claude（既定 `claude-opus-5-5`、max_tokens 32000）に 1 回だけ聞いて�
 
 - `mode: "llm"`（既定）: Claude が `content`（と `title`）から文書を 1 往復で書きます（tool なし、prompt cache なし）。`content` と `title` は呼び出しごとの id 付きの untrusted ブロックで囲み、中の指示には従わないよう system prompt で伝えます。応答全体を包むコードフェンスは 1 つだけ外します。LLM が未設定なら `LLM is not configured` のエラーです
 - 入力の上限: `content` は **60000 文字まで**（`mode: "llm"` のとき。超えたら送らず、切り詰めずにエラー）、`title` は 300 文字までです
-- token 予算（既定 100000、`SUBAGENT_DOCUMENT_TOKEN_BUDGET`）: 1 往復で終わるので、今は応答を受け取った後にしか数えません（1 回の呼び出しが予算を超えることがあります）。runner の送信前の予算確認（Phase 3d で全エージェントに入る予定）が入ると、送る前に予算を確かめます
+- token 予算（既定 100000、`SUBAGENT_DOCUMENT_TOKEN_BUDGET`）: 送る前に確かめます（上の「送る前の token 予算の確認」。request の概算 + max_tokens が残りの予算より多ければ送らず、ファイルも書かずにエラー）。概算なので、1 回の request が予算を超えることはあります
 - `format: "html"`（llm）: system prompt で、静的な HTML（inline CSS のみ）を求め、`<script>`・inline の event handler（`onclick` など）・`javascript:` URL・外部の resource（`<img>` / `<link>` / `<iframe>` / `<form>` / CSS の `url()` など、ブラウザが取りに行く URL）を禁じます。出力そのものは検査・除去しません
 - `mode: "verbatim"`: LLM を使わず（鍵が無くても動きます）、`content` を従来の `execute` と同じ書き方で保存します。`html` は `content` の `&` `<` `>` を escape してから `<html><body><pre>...</pre></body></html>` で包みます（`execute` は従来どおり escape しません）
 - 出力先は workspace（`SUBAGENT_ROOTS`）の `docs/generated-<timestamp>-<8 桁の hex>.<ext>`（`md` → `.md`、`txt` → `.txt`、`html` → `.html`）。名前選びと書き込みは agent の中で直列にし、乱数の suffix で同じ root を使う別 process とも重なりにくくしています。それでも同名があれば `-1`, `-2`, ... を付け、上書きしません

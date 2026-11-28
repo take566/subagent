@@ -365,6 +365,24 @@ async fn token_budget_is_an_error() {
     assert!(written(dir.path()).is_empty());
 }
 
+/// 送る前の予算の確認: 最初の request の概算も収まらなければ何も送らず、書かない
+#[tokio::test]
+async fn tiny_budget_sends_nothing_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = Arc::new(ScriptedLlm::new(vec![ok("# never")]));
+    let mut s = settings();
+    s.token_budget = 100; // max_tokens だけで超える
+    let a = DocumentAgent::with_options(DocumentAgent::default_config(), Some(dir.path().into()))
+        .with_llm(llm.clone(), s);
+    let e = a
+        .call_typed(json!({ "content": "c" }), ctx())
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("token budget"), "{e}");
+    assert!(llm.requests().is_empty(), "no request may be sent");
+    assert!(written(dir.path()).is_empty());
+}
+
 #[tokio::test]
 async fn deadline_already_passed_sends_nothing() {
     let dir = tempfile::tempdir().unwrap();

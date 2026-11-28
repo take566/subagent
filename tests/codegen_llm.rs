@@ -495,25 +495,70 @@ async fn error_message_carries_no_model_text() {
     assert_eq!(paths(&partial["files"]), ["p.txt"]);
 }
 
-#[tokio::test]
-async fn token_budget_stops_with_an_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let llm = Arc::new(ScriptedLlm::new(vec![
+fn budget_script() -> Arc<ScriptedLlm> {
+    Arc::new(ScriptedLlm::new(vec![
         uses(vec![tool_use(
             "w",
             json!({"command": "create", "path": "a.txt", "file_text": "a"}),
         )]),
         done("never"),
-    ]));
+    ]))
+}
+
+/// runner の送る前の概算（[`subagent::llm::runner::estimate_request_tokens`] と同じ式）。
+/// ScriptedLlm が記録した request（JSON）から求める
+fn estimate(req: &Value) -> u64 {
+    let bytes = serde_json::to_vec(req).unwrap().len() as u64;
+    bytes.div_ceil(3) + req["max_tokens"].as_u64().unwrap()
+}
+
+/// 最初の request も予算に収まらなければ何も送らない（isError、stop_reason token_budget）
+#[tokio::test]
+async fn budget_too_small_for_the_first_request_sends_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = budget_script();
     let mut s = settings();
-    s.token_budget = 15; // 1 応答で 20 使う
+    s.token_budget = 15;
     let a = CodeGenAgent::with_sandbox(CodeGenAgent::default_config(), sandbox(dir.path()))
-        .with_llm(llm, s);
-    let e = a.call_typed(json!({"task": "t"}), ctx()).await.unwrap_err();
-    let (msg, partial) = incomplete(e);
-    assert!(msg.contains("token_budget"), "{msg}");
-    assert_eq!(partial["tokens_used"], 20);
+        .with_llm(llm.clone(), s);
+    let (msg, partial) = incomplete(a.call_typed(json!({"task": "t"}), ctx()).await.unwrap_err());
+    assert!(msg.contains("stop_reason: token_budget"), "{msg}");
+    assert_eq!(partial["stop_reason"], "token_budget");
+    assert_eq!(partial["iterations"], 0);
+    assert_eq!(partial["tokens_used"], 0);
+    assert!(llm.requests().is_empty());
     assert!(!dir.path().join("a.txt").exists());
+}
+
+/// 1 回目は収まり 2 回目は収まらない予算: 1 回目の tool_use のファイルと usage が途中の結果に残る
+#[tokio::test]
+async fn budget_for_one_request_keeps_the_first_turn() {
+    // 予算を十分にして request の大きさを測る（nonce は長さが一定なので概算は毎回同じ）
+    let probe = tempfile::tempdir().unwrap();
+    let llm = budget_script();
+    agent(probe.path(), llm.clone())
+        .call_typed(json!({"task": "t"}), ctx())
+        .await
+        .unwrap();
+    let reqs = llm.requests();
+    let (first, second) = (estimate(&reqs[0]), estimate(&reqs[1]));
+    // 1 応答で 20 使う。残り（first - 20）は 2 回目の概算より少ない
+    assert!(first - 20 < second, "{first} {second}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let llm = budget_script();
+    let mut s = settings();
+    s.token_budget = first;
+    let a = CodeGenAgent::with_sandbox(CodeGenAgent::default_config(), sandbox(dir.path()))
+        .with_llm(llm.clone(), s);
+    let (msg, partial) = incomplete(a.call_typed(json!({"task": "t"}), ctx()).await.unwrap_err());
+    assert!(msg.contains("stop_reason: token_budget"), "{msg}");
+    assert!(msg.contains("1 file changed"), "{msg}");
+    assert_eq!(llm.requests().len(), 1);
+    assert_eq!(partial["iterations"], 1);
+    assert_eq!(partial["tokens_used"], 20);
+    assert_eq!(paths(&partial["files"]), ["a.txt"]);
+    assert!(dir.path().join("a.txt").exists());
 }
 
 #[tokio::test]

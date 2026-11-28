@@ -835,49 +835,34 @@ fn invalid_agent_llm_settings_exit_non_zero() {
     }
 }
 
-/// replay backend: 記録した応答（ここでは空）で typed tool が動き、NotConfigured にならない
+/// replay backend: 記録した応答で review の typed tool が動き、NotConfigured にならない。
+/// research / document / codegen はそれぞれ自分の記録で確かめる（tests/research_replay_stdio.rs、
+/// document_replay_writes_the_document、tests/codegen_replay.rs）
 #[cfg(feature = "replay")]
 #[test]
 fn replay_backend_serves_typed_tools() {
-    for (agent, bin) in all_bins() {
-        // LLM を使う research / document / codegen は、それぞれ自分の記録で確かめる
-        // （tests/research_replay_stdio.rs、document_replay_writes_the_document、tests/codegen_replay.rs）。
-        // ここでは review を replay/review.json で通す
-        if agent != "review" {
-            continue;
-        }
-        let fixture = format!(
-            "{}/tests/golden/replay/review.json",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let mut c = Client::spawn_rooted(
-            bin,
-            dir.path(),
-            &[
-                ("SUBAGENT_LLM_BACKEND", "replay"),
-                ("SUBAGENT_LLM_REPLAY_FILE", &fixture),
-                ("MAX_CONCURRENT", "1"),
-            ],
-        );
-        c.initialize();
-        let args = match agent {
-            "research" => json!({ "query": "rust" }),
-            "review" => json!({ "code": "// c\nfn a() {}" }),
-            _ => json!({ "content": "x", "format": "txt" }),
-        };
-        let (err, text) = c.call(typed_name(agent), args);
-        assert!(!err, "{agent}: {text}");
-        let v: Value = serde_json::from_str(&text).unwrap();
-        if agent == "review" {
-            // 記録した structured output から決定的に score を出す（100 - error 10 - 提案 1）
-            assert_eq!(v["score"], 89, "{agent}: {v}");
-            assert_eq!(v["stop_reason"], "end_turn", "{agent}: {v}");
-            assert!(v["summary"].is_string(), "{agent}: {v}");
-        } else {
-            assert_eq!(v["status"], "completed", "{agent}: {v}");
-        }
-    }
+    let fixture = format!(
+        "{}/tests/golden/replay/review.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Client::spawn_rooted(
+        env!("CARGO_BIN_EXE_review-server"),
+        dir.path(),
+        &[
+            ("SUBAGENT_LLM_BACKEND", "replay"),
+            ("SUBAGENT_LLM_REPLAY_FILE", &fixture),
+            ("MAX_CONCURRENT", "1"),
+        ],
+    );
+    c.initialize();
+    let (err, text) = c.call("review", json!({ "code": "// c\nfn a() {}" }));
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    // 記録した structured output から決定的に score を出す（100 - error 10 - 提案 1）
+    assert_eq!(v["score"], 89, "{v}");
+    assert_eq!(v["stop_reason"], "end_turn", "{v}");
+    assert!(v["summary"].is_string(), "{v}");
     // 記録ファイルが無ければ起動しない
     let (status, stderr) = spawn_expect_exit(
         env!("CARGO_BIN_EXE_review-server"),
