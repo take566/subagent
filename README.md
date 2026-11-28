@@ -174,8 +174,8 @@ query・検索結果・取得した page は untrusted として扱います（�
 | `SUBAGENT_LLM_REPLAY_FILE` | `replay` のときの記録ファイル（`MessageResponse` の JSON 配列。順に返す） |
 | `SUBAGENT_MODEL` / `SUBAGENT_<AGENT>_MODEL` | model（既定 `claude-opus-5-5`）。`<AGENT>` は `RESEARCH` / `CODEGEN` / `REVIEW` / `DOCUMENT` で、エージェント名付きが優先 |
 | `SUBAGENT_EFFORT` / `SUBAGENT_<AGENT>_EFFORT` | `low` / `medium` / `high` / `xhigh` / `max`（既定は送らない）。不正な値では起動しません |
-| `SUBAGENT_TOKEN_BUDGET` / `SUBAGENT_<AGENT>_TOKEN_BUDGET` | 1 タスクの token 予算（正の整数。既定 research 300000 / codegen 1000000 / review 100000 / document 100000）。不正な値では起動しません |
-| `SUBAGENT_REVIEW_LINT_COMMAND` | review の typed tool で `lint: true` のときに実行するコマンド（例 `cargo clippy`）。`bash_tool` と同じ allowlist を通るので、**その program を review-server の `SUBAGENT_CODEGEN_ALLOWED_COMMANDS` にも入れてください**（入っていなければ lint は実行されず、warn を出して lint 無しで続けます）。未設定で `lint: true` ならエラー |
+| `SUBAGENT_TOKEN_BUDGET` / `SUBAGENT_<AGENT>_TOKEN_BUDGET` | 1 タスクの token 予算（正の整数。既定 research 300000 / codegen 1000000 / review 150000 / document 100000）。不正な値では起動しません |
+| `SUBAGENT_REVIEW_LINT_COMMAND` | review の typed tool で `lint: true` のときに実行するコマンド（例 `cargo clippy`）。`bash_tool` と同じ allowlist を通るので、**その program を review-server の `SUBAGENT_CODEGEN_ALLOWED_COMMANDS` にも入れてください**（入っていない・起動できない場合、typed tool は応答の `lint_error` に理由を入れてレビューを続けます）。未設定で `lint: true` ならエラー |
 | `SUBAGENT_ROOTS` | **必須**（ファイル・コマンドのツールを使う場合）。workspace の root の絶対パス。複数なら OS の path 区切り（Windows は `;`、それ以外は `:`）で並べ、相対パスは最初の root 基準。未設定ならツールは拒否する |
 | `SUBAGENT_MAX_FILE_BYTES` | 1 ファイルの上限（既定 1048576 byte）。超えるファイルは読まず、書かない |
 | `SUBAGENT_MAX_FILES` | 1 タスクで書き込むファイル数の上限（既定 200）。エージェントのタスク（`execute`）と direct tool の呼び出しごとに数え直す |
@@ -207,6 +207,17 @@ query・検索結果・取得した page は untrusted として扱います（�
 Windows では allowlist にも program にも `.exe` 以外の拡張子（`.bat` / `.cmd` など）は使えません（`cmd.exe` を通って実行されるため）。`npm` のような `.cmd` だけの program は実行できません。
 
 > **警告: allowlist は sandbox ではありません。** `cargo` は `build.rs` を、`npm` は package の script を実行するので、許可した program を通じて任意のコードが動き、workspace の外も読み書きできます。timeout で kill するのは直接の子プロセスだけで、孫プロセスは残ることがあります。`cargo` / `npm` / `python` などを許可するのは、コンテナや WSL など、壊れても困らない隔離された環境の中だけにしてください。ホストで動かす場合は `SUBAGENT_CODEGEN_ALLOWED_COMMANDS` を設定しないでください。
+
+### Review エージェントの typed tool（`review`）
+
+Claude（既定 `claude-opus-5-5`）に 1 回だけ聞いてレビューします。
+
+- 入力は `code`（文字列）か `path`（`SUBAGENT_ROOTS` からの相対パス。絶対パス・`..` は Workspace が拒否）のどちらか一方。12 万文字を超える入力はエラー。1 行で絶対パスに見える `code` もエラー
+- コード・`language` / `path`・lint の出力は、推測できない id 付きの `<<<UNTRUSTED_...>>>` で囲んで渡し、その中の指示には従わないよう system prompt で指示します
+- 出力は structured output（`output_config.format` の `json_schema`）。`issues[]`（`type` は `error` / `warning` / `info`、任意で `severity` / `line` / `rule`）・`suggestions[]`・`summary`
+- `score` は従来の決定的な計算（100 − error×10 − warning×2 − 提案の数、0〜100）。数えるのは Claude の指摘・従来の heuristics（大きすぎるファイル、コメントの少なさ）・lint の指摘
+- `lint: true` は `SUBAGENT_REVIEW_LINT_COMMAND` を workspace の root で実行します（`code` で渡した場合もそのコードではなく workspace を lint します）。終了コードが 0 以外でも結果（`lint.success: false`）として扱い、allowlist に無い・起動できない場合は `lint_error` を返します
+- 応答: `{score, issues, suggestions, summary, lint?: {command, success, timed_out, truncated, issues}, lint_error?, tokens_used, stop_reason}`。拒否（refusal）・max_tokens・不正な JSON・deadline・token 予算（既定 150000）・取り消しは isError
 
 ### Review エージェントの lint
 

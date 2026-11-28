@@ -831,16 +831,18 @@ fn invalid_agent_llm_settings_exit_non_zero() {
 #[cfg(feature = "replay")]
 #[test]
 fn replay_backend_serves_typed_tools() {
-    let fixture = format!(
-        "{}/tests/golden/replay/empty.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
     for (agent, bin) in all_bins() {
         // research と document は空の記録では答えられない（LLM の経路。research は tests/research_agent.rs の
         // replay_fixture_succeeds、document は replay/document.json の document_replay_writes_the_document）
         if agent == "research" || agent == "document" {
             continue;
         }
+        // LLM を呼ぶ agent は自分の記録（tests/golden/replay/<agent>.json）を使う
+        let name = if agent == "review" { "review" } else { "empty" };
+        let fixture = format!(
+            "{}/tests/golden/replay/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
         let dir = tempfile::tempdir().unwrap();
         let mut c = Client::spawn_rooted(
             bin,
@@ -861,7 +863,14 @@ fn replay_backend_serves_typed_tools() {
         let (err, text) = c.call(typed_name(agent), args);
         assert!(!err, "{agent}: {text}");
         let v: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(v["status"], "completed", "{agent}: {v}");
+        if agent == "review" {
+            // 記録した structured output から決定的に score を出す（100 - error 10 - 提案 1）
+            assert_eq!(v["score"], 89, "{agent}: {v}");
+            assert_eq!(v["stop_reason"], "end_turn", "{agent}: {v}");
+            assert!(v["summary"].is_string(), "{agent}: {v}");
+        } else {
+            assert_eq!(v["status"], "completed", "{agent}: {v}");
+        }
     }
     // 記録ファイルが無ければ起動しない
     let (status, stderr) = spawn_expect_exit(
