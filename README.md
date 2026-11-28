@@ -22,6 +22,22 @@ cargo build --release
 cargo test
 ```
 
+### CI
+
+`.github/workflows/ci.yml` が PR・master への push・毎週月曜の定期実行・手動実行（workflow_dispatch）で次を検査します。
+
+| ジョブ | 内容 |
+| --- | --- |
+| `rust (ubuntu-latest)` / `rust (windows-latest)` | `cargo fmt --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --locked`、`cargo doc --no-deps --locked`（ubuntu のみ、警告はエラー） |
+| `msrv (1.89)` | Cargo.toml の `rust-version` で `cargo check --all-targets --locked` |
+| `deny` | [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) で依存の脆弱性勧告・禁止事項（バージョン指定 `*` など）・ライセンス・取得元を検査（設定は `deny.toml`） |
+
+手元で同じ検査をするには、CI と同じ版を `cargo install cargo-deny@0.20.2 --locked` で入れて `cargo deny --locked check` を実行します。
+RustSec に新しい勧告が出ると PR でも `deny` が失敗します。すぐに対応できない勧告は、理由を書いて `deny.toml` の `ignore` に追加してください。
+依存と GitHub Actions の更新は Dependabot（`.github/dependabot.yml`）が週に一度 PR を作ります。
+依存の更新で必要な Rust の版が上がると `msrv` ジョブが失敗します。その場合は Cargo.toml の `rust-version` と `msrv` ジョブの toolchain を一緒に上げてください。
+GitHub はリポジトリに 60 日間動きがないと定期実行を止めるので、その場合は Actions の画面から再度有効にしてください。
+
 ## 使用方法
 
 ### 基本的な使用例

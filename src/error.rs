@@ -40,6 +40,9 @@ pub enum Error {
     Sandbox(String),
 
     #[error("{0}")]
+    Llm(#[from] crate::llm::LlmError),
+
+    #[error("{0}")]
     Other(String),
 }
 
@@ -55,6 +58,7 @@ impl Error {
             Error::Regex(_) => "RegexError",
             Error::Json(_) => "JsonError",
             Error::Sandbox(_) => "SandboxError",
+            Error::Llm(_) => "LlmError",
             Error::Other(_) => "Error",
         }
     }

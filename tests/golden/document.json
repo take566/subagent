@@ -106,7 +106,60 @@
           }
         ]
       }
+    },
+    {
+      "call": {
+        "name": "notion_page_create",
+        "arguments": {
+          "parent_page_id": "p",
+          "title": "t",
+          "content": "x"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: NOTION_TOKEN environment variable is not set"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "call": {
+        "name": "notion_page_update",
+        "arguments": {
+          "title": "t"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: page_id is required"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "call": {
+        "name": "notion_page_update",
+        "arguments": {
+          "page_id": "p"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: title or content is required"
+          }
+        ],
+        "isError": true
+      }
     }
   ],
-  "stdout_non_json_lines": 45
+  "stdout_non_json_lines": 49
 }

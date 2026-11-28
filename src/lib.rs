@@ -6,6 +6,7 @@
 pub mod agents;
 pub mod core;
 pub mod error;
+pub mod llm;
 pub mod mcp;
 pub mod orchestrator;
 pub mod protocol;

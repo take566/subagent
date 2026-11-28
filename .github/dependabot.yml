@@ -1,0 +1,25 @@
+# 依存クレートと GitHub Actions（SHA 固定）の更新 PR を週に一度作る。
+# 公開から 14 日経っていない版は提案しない（サプライチェーン攻撃への備え）。
+# 注: dtolnay/rust-toolchain は master ブランチの SHA に固定している。Dependabot が別の参照
+#     （v1 タグなど）への更新を提案することがあるので、内容を確かめてから取り込む。
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      actions:
+        patterns: ["*"]
