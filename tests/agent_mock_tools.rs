@@ -156,6 +156,34 @@ async fn research_failure_retries_then_records_failed() {
     assert_failed_state(&agent, Some("RESEARCH_ERROR"));
 }
 
+#[tokio::test]
+async fn research_requires_non_empty_string_query() {
+    // 以前は query が無いと「「undefined」に関する調査結果」で completed になっていた
+    for params in [
+        json!({}),
+        json!({ "query": "" }),
+        json!({ "query": " \t\n" }),
+        json!({ "query": 42 }),
+        json!({ "query": null }),
+    ] {
+        let search = MockTool::new("web_search", |_| Ok(json!({ "results": [] })));
+        let agent = ResearchAgent::with_tools(
+            research_config(),
+            replace(ResearchAgent::default_tools(), search.clone()),
+        );
+
+        let e = agent
+            .execute(task("t1", "research", params.clone()))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(e, Error::InvalidParameter(_)), "{params}: {e:?}");
+        assert!(e.to_string().contains("`query`"), "{params}: {e}");
+        assert_eq!(search.calls(), 0, "{params}: 検索も retry もしない");
+        assert_failed_state(&agent, Some("RESEARCH_ERROR"));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CodeGenAgent
 // ---------------------------------------------------------------------------

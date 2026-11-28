@@ -4,7 +4,7 @@ use crate::agents::common;
 use crate::core::call::CallCtx;
 use crate::core::subagent::{AgentBase, Subagent};
 use crate::core::tool::Tool;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::llm::{AgentKind, AgentLlm, AgentLlmSettings, LlmClient};
 use crate::tools::{DocumentParserTool, WebFetchTool, WebSearchTool, js_display};
 use crate::types::{
@@ -158,7 +158,7 @@ impl ResearchAgent {
     }
 
     /// 情報を統合して要約を生成（実際の実装では LLM を使用）
-    fn synthesize(details: &[Value], query: Option<&Value>) -> String {
+    fn synthesize(details: &[Value], query: &Value) -> String {
         let summaries = details
             .iter()
             .map(|d| {
@@ -173,7 +173,7 @@ impl ResearchAgent {
             .join("\n\n");
         format!(
             "「{}」に関する調査結果:\n\n{}...",
-            js_display(query),
+            js_display(Some(query)),
             js_substring(&summaries, 1000)
         )
     }
@@ -239,16 +239,22 @@ impl Subagent for ResearchAgent {
     async fn execute(&self, task: Task) -> Result<TaskResult> {
         let base = &self.base;
         base.run_task(&task, &self.error_handler, "RESEARCH_ERROR", || async {
-            let query = task.parameters.get("query").cloned();
+            // 以前（TS 版どおり）は query が無いと「「undefined」に関する調査結果」を返していた
+            let query = match task.parameters.get("query") {
+                Some(q @ Value::String(s)) if !s.trim().is_empty() => q.clone(),
+                _ => {
+                    return Err(Error::InvalidParameter(
+                        "`query` (non-empty string) is required".into(),
+                    ));
+                }
+            };
             let depth = task.param_str("depth").unwrap_or("standard");
 
             base.report_progress(&task.id, 0.1, "検索を開始");
 
             // 1. 検索実行
             let mut search_params = crate::types::JsonMap::new();
-            if let Some(q) = &query {
-                search_params.insert("query".into(), q.clone());
-            }
+            search_params.insert("query".into(), query.clone());
             search_params.insert(
                 "max_results".into(),
                 json!(if depth == "detailed" { 10 } else { 5 }),
@@ -277,7 +283,7 @@ impl Subagent for ResearchAgent {
             base.report_progress(&task.id, 0.7, "詳細取得完了");
 
             // 3. 要約生成
-            let summary = Self::synthesize(&details, query.as_ref());
+            let summary = Self::synthesize(&details, &query);
             base.report_progress(&task.id, 0.9, "要約生成完了");
 
             let confidence = Self::calculate_confidence(&details);

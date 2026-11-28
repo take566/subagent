@@ -292,6 +292,14 @@ fn check_server_against_ts(agent: &str, bin: &str) {
             assert_eq!(t["description"], "Bashコマンドを実行");
             t["description"] = json!(BASH_TOOL_DESCRIPTION);
         }
+        if t["name"] == "execute" {
+            // 意図した差分: execute の inputSchema に validate_execute_args と同じ制約
+            // （`required: ["action"]`、action / task_id の `minLength: 1`）を書いた
+            let schema = &mut t["inputSchema"];
+            schema["required"] = json!(["action"]);
+            schema["properties"]["action"]["minLength"] = json!(1);
+            schema["properties"]["task_id"]["minLength"] = json!(1);
+        }
     }
     assert_eq!(pick(direct), expected_tools, "{agent}: tools/list");
 
@@ -876,6 +884,27 @@ fn replay_backend_serves_typed_tools() {
 // ---------------------------------------------------------------------------
 
 /// TS 版でも isError になる入力（golden 記録後に追加した確認）
+#[test]
+fn research_without_query_is_a_tool_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Client::spawn(env!("CARGO_BIN_EXE_research-server"), dir.path());
+    c.request(
+        "initialize",
+        json!({ "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } }),
+    );
+    c.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+    // 以前は「「undefined」に関する調査結果」で成功していた
+    let (err, text) = c.call(
+        "execute",
+        json!({ "task_id": "q1", "action": "research", "parameters": {} }),
+    );
+    assert!(err, "{text}");
+    assert_eq!(
+        text,
+        "Error: Invalid parameter: `query` (non-empty string) is required"
+    );
+}
+
 #[test]
 fn invalid_inputs_are_tool_errors() {
     let dir = tempfile::tempdir().unwrap();
