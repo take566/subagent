@@ -1,0 +1,82 @@
+{
+  "serverInfo": {
+    "name": "ReviewAgent",
+    "version": "1.0.0"
+  },
+  "tools": [
+    {
+      "name": "view",
+      "description": "ファイルの内容を閲覧",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "required": true
+          }
+        }
+      }
+    },
+    {
+      "name": "bash_tool",
+      "description": "Lintを実行",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "required": true
+          },
+          "cwd": {
+            "type": "string",
+            "required": false
+          }
+        }
+      }
+    },
+    {
+      "name": "execute",
+      "description": "タスクを実行",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "description": "タスクID"
+          },
+          "action": {
+            "type": "string",
+            "description": "アクション名"
+          },
+          "parameters": {
+            "type": "object",
+            "description": "パラメータ"
+          }
+        }
+      }
+    }
+  ],
+  "calls": [
+    {
+      "call": {
+        "name": "execute",
+        "arguments": {
+          "task_id": "g-3",
+          "action": "review",
+          "parameters": {
+            "source_code": "fn a() {}\n// c\n"
+          }
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"taskId\": \"g-3\",\n  \"status\": \"completed\",\n  \"result\": {\n    \"issues\": \"<TS ran `npm run lint`; npm error lines were counted as lint errors (score 20). Rust: lint only when lint_command is given>\",\n    \"suggestions\": [],\n    \"score\": 20\n  },\n  \"confidence\": 0.9,\n  \"metrics\": {\n    \"duration_ms\": \"<DURATION>\",\n    \"tools_called\": 2\n  }\n}"
+          }
+        ]
+      }
+    }
+  ],
+  "stdout_non_json_lines": 54
+}

@@ -278,7 +278,9 @@ interface SubagentState {
 
 ---
 
-## 9. 実装例（TypeScript）
+## 9. 実装例（TypeScript による擬似コード）
+
+> 実装は v1.1.0 で Rust に移植済み（`src/core/subagent.rs` の `Subagent` トレイトと `AgentBase`）。以下は設計時の擬似コード。
 
 ```typescript
 abstract class Subagent {
