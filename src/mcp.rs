@@ -281,20 +281,20 @@ impl McpServer {
                 McpTool::new(name, description, object_schema(properties))
             })
             .collect();
-        tools.push(McpTool::new(
-            "execute",
-            "タスクを実行",
-            object_schema(
-                json!({
-                    "task_id": { "type": "string", "description": "タスクID" },
-                    "action": { "type": "string", "description": "アクション名" },
-                    "parameters": { "type": "object", "description": "パラメータ" },
-                })
-                .as_object()
-                .cloned()
-                .unwrap_or_default(),
-            ),
-        ));
+        // validate_execute_args と同じ制約を schema にも書く（クライアントが送る前に分かるように）。
+        // ほかのツールは TS 版どおり property ごとの `required: true` の形のまま
+        let mut execute_schema = object_schema(
+            json!({
+                "task_id": { "type": "string", "minLength": 1, "description": "タスクID" },
+                "action": { "type": "string", "minLength": 1, "description": "アクション名" },
+                "parameters": { "type": "object", "description": "パラメータ" },
+            })
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        );
+        execute_schema.insert("required".into(), json!(["action"]));
+        tools.push(McpTool::new("execute", "タスクを実行", execute_schema));
         tools.extend(typed);
         tools
     }
@@ -1133,5 +1133,16 @@ mod tests {
         // 既定の task id は uuid
         let id = calls[0].id.strip_prefix("task-").unwrap();
         assert!(uuid::Uuid::parse_str(id).is_ok(), "{id}");
+    }
+
+    #[test]
+    fn execute_schema_requires_non_empty_action() {
+        let (server, _) = server_with(&[]);
+        let tools = server.tool_list();
+        let execute = tools.iter().find(|t| t.name == "execute").unwrap();
+        let schema = Value::Object((*execute.input_schema).clone());
+        assert_eq!(schema["required"], json!(["action"]));
+        assert_eq!(schema["properties"]["action"]["minLength"], json!(1));
+        assert_eq!(schema["properties"]["task_id"]["minLength"], json!(1));
     }
 }

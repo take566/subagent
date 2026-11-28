@@ -6,15 +6,24 @@
     },
     "subagent-codegen": {
       "command": "./target/release/codegen-server",
-      "args": []
+      "args": [],
+      "env": {
+        "SUBAGENT_ROOTS": "/absolute/path/to/workspace"
+      }
     },
     "subagent-review": {
       "command": "./target/release/review-server",
-      "args": []
+      "args": [],
+      "env": {
+        "SUBAGENT_ROOTS": "/absolute/path/to/workspace"
+      }
     },
     "subagent-document": {
       "command": "./target/release/document-server",
-      "args": []
+      "args": [],
+      "env": {
+        "SUBAGENT_ROOTS": "/absolute/path/to/workspace"
+      }
     }
   }
 }

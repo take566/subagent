@@ -118,17 +118,22 @@
           "properties": {
             "task_id": {
               "type": "string",
+              "minLength": 1,
               "description": "タスクID"
             },
             "action": {
               "type": "string",
+              "minLength": 1,
               "description": "アクション名"
             },
             "parameters": {
               "type": "object",
               "description": "パラメータ"
             }
-          }
+          },
+          "required": [
+            "action"
+          ]
         }
       },
       {

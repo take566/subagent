@@ -135,6 +135,8 @@ cargo build --release
 ```
 
 クライアント設定例は [mcp-config.example.json](mcp-config.example.json) を参照してください。`command` の相対パスはクライアントの作業ディレクトリ基準で解決されるので、実際には絶対パスに書き換えてください。
+CodeGen / Review / Document の `env.SUBAGENT_ROOTS` も、すでにあるディレクトリの絶対パスに書き換えてください（無いとファイルを扱うツールはエラーになります）。Windows では `"D:\\work\\proj"` か `"D:/work/proj"` と書きます（`/` で始まるパスは絶対パスとみなされず拒否されます）。
+`SUBAGENT_CODEGEN_ALLOWED_COMMANDS` は例に入れていません（コマンドの実行は隔離した環境でだけ有効にしてください。[sandbox](#sandboxファイルとコマンドの制限) を参照）。Document の Notion ツールを使う場合は `NOTION_TOKEN` も `env` に入れます。既定（`hermes`）の typed tool は LLM を使うので、`SUBAGENT_ANTHROPIC_API_KEY` も `env` に入れてください（鍵は例に書いていません。設定ファイルを共有するときは鍵を含めないでください）。
 
 ### 公開するツール（`SUBAGENT_MCP_MODE`）
 

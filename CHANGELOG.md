@@ -56,6 +56,13 @@
 - CI に `macos-latest` を追加した（macOS の `F_GETPATH` の実装をコンパイルする）
 - 既知の限界（README に記載）: 競合時に root の外に空のファイル / ディレクトリができうる（中身は書かない）、`changes()` は別名（8.3・大文字小文字）を別々に載せる、コマンドはファイル操作と直列化しない、timeout で kill するのは直接の子だけ
 
+### 挙動の変更（MCP の使い勝手）
+- Research エージェントの `execute`（`SUBAGENT_MCP_MODE=full` / Orchestrator の経路）は `query` が無い・空（空白だけを含む）・文字列でないとき ``Invalid parameter: `query` (non-empty string) is required`` で失敗する（検索は呼ばない）。以前は TS 版どおり「「undefined」に関する調査結果」（数値なら「「42」…」）で completed になっていた。Orchestrator 経由では、このタスクの失敗が実行全体のエラーになる。直接呼ぶ `web_search` ツールは変えていない
+- `execute`（`full`）の inputSchema に `required: ["action"]` と、`action` / `task_id` の `minLength: 1` を書いた（検証の内容は変えていない）
+
+### ドキュメント
+- `mcp-config.example.json` の codegen / review / document に `env.SUBAGENT_ROOTS` を入れた。以前の例のままではファイルを扱うツールがすべてエラーになった
+
 ## [1.1.0] - 2026-11-28
 
 ### 変更
