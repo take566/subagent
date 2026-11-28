@@ -606,7 +606,9 @@ mod tests {
             assert_eq!(f["task_id"], "t1");
             assert_eq!(f["correlation_id"], "c1");
             assert_eq!(f["status"], "completed");
-            assert!(f["duration"].as_u64().unwrap() >= 20, "{f}");
+            // ms 単位であること（µs だと 20_000 以上になる）
+            let d = f["duration"].as_u64().unwrap();
+            assert!((20..10_000).contains(&d), "{f}");
             assert!(f.get("data").is_none(), "{f}");
         }
 
@@ -641,7 +643,8 @@ mod tests {
             assert_eq!(f["task_id"], "t3");
             assert_eq!(f["correlation_id"], "c3");
             assert_eq!(f["status"], "failed");
-            assert!(f["duration"].as_u64().unwrap() >= 20, "{f}");
+            let d = f["duration"].as_u64().unwrap();
+            assert!((20..10_000).contains(&d), "{f}");
             assert_eq!(f["data"], json!({ "error": e.to_string() }));
             assert!(
                 !sink
@@ -673,13 +676,31 @@ mod tests {
             let (o, sink) = orchestrator();
             o.execute(
                 vec![
-                    task("a", "mock", json!({}), Some("ca")),
-                    task("b", "mock", json!({}), None),
+                    task("a", "mock", json!({ "sleep_ms": 30 }), Some("ca")),
+                    task("b", "mock", json!({ "sleep_ms": 10 }), None),
                 ],
                 Some(ExecutionPattern::Parallel),
             )
             .await
             .unwrap();
+            // a と b が実際に重なって走っている（b が先に終わる）
+            let order: Vec<String> = sink
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|s| serde_json::from_str::<Value>(s).unwrap())
+                .filter_map(|e| e["message"].as_str().map(str::to_string))
+                .filter(|m| m.starts_with("Executing task") || m.starts_with("Task finished"))
+                .collect();
+            assert_eq!(
+                order,
+                [
+                    "Executing task: a",
+                    "Executing task: b",
+                    "Task finished: b",
+                    "Task finished: a",
+                ]
+            );
             for m in ["Executing task: a", "Task finished: a"] {
                 assert_eq!(entry(&sink, m)["correlation_id"], "ca", "{m}");
             }
