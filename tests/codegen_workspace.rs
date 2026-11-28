@@ -126,6 +126,30 @@ fn no_write_path_reaches_dot_git() {
         w.insert_tracked(&mut log, &allow, ".git/config", 0, "x")
             .unwrap_err()
     ));
+    // 無いファイルでも（大文字小文字を区別する FS で `.Git/config` が無い時も）、
+    // 読み込みの not found より先に .git の拒否になる
+    for p in [".GIT/missing", "x/.gIt/nope", ".git/nope"] {
+        assert!(
+            is_git_denial(w.str_replace(p, "a", "b").unwrap_err()),
+            "{p}"
+        );
+        assert!(
+            is_git_denial(w.replace_all(p, "a", "b").unwrap_err()),
+            "{p}"
+        );
+        assert!(is_git_denial(w.insert(p, 0, "x").unwrap_err()), "{p}");
+        assert!(
+            is_git_denial(
+                w.str_replace_tracked(&mut log, &allow, p, "a", "b")
+                    .unwrap_err()
+            ),
+            "{p}"
+        );
+        assert!(
+            is_git_denial(w.insert_tracked(&mut log, &allow, p, 0, "x").unwrap_err()),
+            "{p}"
+        );
+    }
     assert_eq!(
         std::fs::read_to_string(dir.path().join(".git/config")).unwrap(),
         "[core]\n"

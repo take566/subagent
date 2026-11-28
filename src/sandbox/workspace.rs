@@ -625,6 +625,21 @@ impl Workspace {
         if hit { Err(git_denied(shown)) } else { Ok(()) }
     }
 
+    /// 渡された相対 path の component に `.git`（大文字小文字は問わない）があれば拒否する。
+    /// 読み込みや存在確認より先に呼ぶ（大文字小文字を区別する FS で `.Git/config` が無くても、
+    /// not found ではなく拒否になるように）。検証済みの component を返す
+    fn deny_git_rel(&self, rel: &str) -> Result<Vec<String>> {
+        let parts = validate_relative(rel)?;
+        // .git の下（hook・config）に書けると、後で git を使った時にホストでコードが動く
+        if parts
+            .iter()
+            .any(|p| is_git_component(std::ffi::OsStr::new(p)))
+        {
+            return Err(git_denied(&parts.join("/")));
+        }
+        Ok(parts)
+    }
+
     /// 書き込み。`may_write` は lock の中（呼び出し側が持つ）で、ディレクトリを作る前に呼ぶ
     fn write_locked(
         &self,
@@ -643,15 +658,8 @@ impl Workspace {
                 self.limits.max_file_bytes
             )));
         }
-        let parts = validate_relative(rel)?;
+        let parts = self.deny_git_rel(rel)?;
         let shown = parts.join("/");
-        // .git の下（hook・config）に書けると、後で git を使った時にホストでコードが動く
-        if parts
-            .iter()
-            .any(|p| is_git_component(std::ffi::OsStr::new(p)))
-        {
-            return Err(git_denied(&shown));
-        }
         let tracked = changes.iter().any(|c| c.path == shown);
         if !tracked && changes.len() >= self.limits.max_files {
             return Err(deny(format!(
@@ -769,6 +777,7 @@ impl Workspace {
         old: &str,
         new: &str,
     ) -> Result<()> {
+        self.deny_git_rel(rel)?;
         if old.is_empty() {
             return Err(Error::InvalidParameter(
                 "`old_str` must not be empty".into(),
@@ -794,6 +803,7 @@ impl Workspace {
     /// 重ならない一致をすべて置き換え、件数を返す（0 件なら書かない）。MCP の `str_replace` 用
     pub fn replace_all(&self, rel: &str, search: &str, replace: &str) -> Result<usize> {
         let mut changes = self.lock();
+        self.deny_git_rel(rel)?;
         let content = self.read_locked(rel)?;
         let n = if search.is_empty() {
             0
@@ -821,6 +831,7 @@ impl Workspace {
         after_line: usize,
         text: &str,
     ) -> Result<()> {
+        self.deny_git_rel(rel)?;
         let content = self.read_locked(rel)?;
         let lines: Vec<&str> = content.split_inclusive('\n').collect();
         if after_line > lines.len() {
