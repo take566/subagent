@@ -1,0 +1,242 @@
+{
+  "initialize": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {
+      "tools": {}
+    },
+    "serverInfo": {
+      "name": "ResearchAgent",
+      "version": "1.0.0"
+    }
+  },
+  "tools_list": {
+    "hermes": [
+      {
+        "name": "research",
+        "description": "Web を調べて要約と出典を返す",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "調べる内容"
+            },
+            "depth": {
+              "type": "string",
+              "enum": [
+                "quick",
+                "standard",
+                "detailed"
+              ],
+              "description": "調べる深さ（既定 standard）"
+            },
+            "allowed_domains": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "検索・取得を許すドメイン（省略時は制限なし）"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "full": [
+      {
+        "name": "web_search",
+        "description": "Web検索を実行",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "required": true
+            },
+            "max_results": {
+              "type": "number",
+              "required": false
+            }
+          }
+        }
+      },
+      {
+        "name": "web_fetch",
+        "description": "Webページの内容を取得",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "required": true
+            }
+          }
+        }
+      },
+      {
+        "name": "document_parser",
+        "description": "ドキュメントを解析",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string",
+              "required": true
+            },
+            "format": {
+              "type": "string",
+              "required": false
+            }
+          }
+        }
+      },
+      {
+        "name": "execute",
+        "description": "タスクを実行",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "タスクID"
+            },
+            "action": {
+              "type": "string",
+              "description": "アクション名"
+            },
+            "parameters": {
+              "type": "object",
+              "description": "パラメータ"
+            }
+          }
+        }
+      },
+      {
+        "name": "research",
+        "description": "Web を調べて要約と出典を返す",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "調べる内容"
+            },
+            "depth": {
+              "type": "string",
+              "enum": [
+                "quick",
+                "standard",
+                "detailed"
+              ],
+              "description": "調べる深さ（既定 standard）"
+            },
+            "allowed_domains": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "検索・取得を許すドメイン（省略時は制限なし）"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  "typed_errors": [
+    {
+      "case": "unexpected_field",
+      "call": {
+        "name": "research",
+        "arguments": {
+          "query": "rust",
+          "depth": "quick",
+          "nope": 1
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: unexpected field `nope`"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "wrong_type",
+      "call": {
+        "name": "research",
+        "arguments": {
+          "query": 1
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: field `query` must be of type \"string\""
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "not_configured",
+      "call": {
+        "name": "research",
+        "arguments": {
+          "query": "rust",
+          "depth": "quick"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: LLM is not configured (set SUBAGENT_ANTHROPIC_API_KEY)"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "missing_required",
+      "call": {
+        "name": "research",
+        "arguments": {}
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: missing required field `query`"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "missing_arguments",
+      "call": {
+        "name": "research"
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Missing arguments"
+          }
+        ],
+        "isError": true
+      }
+    }
+  ]
+}

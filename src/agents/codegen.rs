@@ -1,8 +1,11 @@
 //! Code Generation Agent 実装
 
+use crate::agents::common;
+use crate::core::call::CallCtx;
 use crate::core::subagent::{AgentBase, Subagent};
 use crate::core::tool::Tool;
 use crate::error::Result;
+use crate::llm::{AgentKind, AgentLlm, AgentLlmSettings, LlmClient};
 use crate::sandbox::Sandbox;
 use crate::tools::{BashTool, FileCreateTool, StrReplaceTool, js_display};
 use crate::types::{
@@ -11,6 +14,7 @@ use crate::types::{
 };
 use crate::utils::{ErrorHandler, RetryManager};
 use async_trait::async_trait;
+use rmcp::model::Tool as McpTool;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,6 +24,7 @@ pub struct CodeGenAgent {
     #[allow(dead_code)] // 将来の拡張用（TS 版と同じ）
     retry_manager: RetryManager,
     error_handler: ErrorHandler,
+    llm: AgentLlm,
 }
 
 /// 生成結果（ファイルパス → 内容）
@@ -67,7 +72,8 @@ impl CodeGenAgent {
                     backoff: Backoff::Exponential,
                     initial_delay_ms: Some(1000),
                 }),
-                timeout: Some(120000),
+                // 打ち切りは SUBAGENT_DEADLINE_SECS（MCP）。Some にすると deadline をそれ以下に縮める
+                timeout: None,
                 fallback: Some("return_partial".into()),
             },
         }
@@ -132,7 +138,21 @@ impl CodeGenAgent {
             base,
             retry_manager,
             error_handler,
+            llm: AgentLlm::unconfigured(AgentKind::CodeGen),
         }
+    }
+
+    /// typed tool の名前
+    pub const TYPED_TOOL: &'static str = "codegen";
+
+    /// LLM を差し替える（`new()` などの既定は通信しない [`crate::llm::UnconfiguredLlm`]）
+    pub fn with_llm(mut self, client: Arc<dyn LlmClient>, settings: AgentLlmSettings) -> Self {
+        self.llm = AgentLlm::new(client, settings);
+        self
+    }
+
+    pub fn llm(&self) -> &AgentLlm {
+        &self.llm
     }
 
     /// コードを生成（モック実装。実際の実装では LLM を使用）
@@ -163,6 +183,39 @@ impl Default for CodeGenAgent {
 impl Subagent for CodeGenAgent {
     fn base(&self) -> &AgentBase {
         &self.base
+    }
+
+    fn typed_tool(&self) -> Option<McpTool> {
+        Some(common::typed_tool(
+            Self::TYPED_TOOL,
+            "workspace（SUBAGENT_ROOTS）の中でコードを書く・直す",
+            json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "作るもの・直すことの説明" },
+                    "files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "関係するファイル（workspace からの相対パス）"
+                    },
+                    "allow_commands": {
+                        "type": "boolean",
+                        "description": "allowlist（SUBAGENT_CODEGEN_ALLOWED_COMMANDS）のコマンドの実行を許すか（既定 false）"
+                    }
+                },
+                "required": ["task"],
+                "additionalProperties": false
+            }),
+        ))
+    }
+
+    /// 3a の仮実装: `task` を既存の `execute` の `specification` に写す（LLM が未設定ならエラー）。
+    /// `files` / `allow_commands` はまだ使わない。3e で置き換える
+    async fn call_typed(&self, args: Value, _ctx: CallCtx) -> Result<Value> {
+        let mut p = JsonMap::new();
+        common::copy_arg(&args, "task", &mut p, "specification");
+        self.llm.ensure_configured()?;
+        common::task_value(self.execute(common::typed_task("codegen", p)).await?)
     }
 
     async fn execute(&self, task: Task) -> Result<TaskResult> {

@@ -42,6 +42,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
+tokio-util = "0.7.20"
 uuid = { version = "1.29.3", features = ["v4"] }
 
 # sandbox: open 済み handle の実 path（TOCTOU 対策）
@@ -55,3 +56,5 @@ libc = "0.2.191"
 [dev-dependencies]
 tempfile = "3.27.0"
 wiremock = "0.6.5"
+# paused time（deadline のテスト）
+tokio = { version = "1.54.1", features = ["full", "test-util"] }

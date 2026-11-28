@@ -551,3 +551,80 @@ async fn max_tokens_raise_is_capped_at_32000_by_default() {
     let reqs = llm.requests();
     assert_eq!(reqs[1]["max_tokens"], 32_000);
 }
+
+/// observer は応答を受け取るたびに 1 回ずつ（1 始まりの番号で）呼ばれる
+#[tokio::test]
+async fn observer_is_called_once_per_iteration() {
+    #[derive(Default)]
+    struct Seen(Mutex<Vec<u32>>);
+    #[async_trait]
+    impl subagent::llm::RunObserver for Seen {
+        async fn on_iteration(&self, iteration: u32, _r: &subagent::llm::MessageResponse) {
+            self.0.lock().unwrap().push(iteration);
+        }
+    }
+    let llm = Arc::new(ScriptedLlm::new(vec![
+        resp(
+            StopReason::ToolUse,
+            vec![tool_use("t1", "lookup", json!({"q": "a"}))],
+        ),
+        resp(StopReason::EndTurn, vec![text("done")]),
+    ]));
+    let seen = Arc::new(Seen::default());
+    let out = runner(llm, Arc::new(Recorder::default()), RunnerLimits::default())
+        .with_observer(seen.clone())
+        .run(vec![Message::user_text("go")])
+        .await
+        .unwrap();
+    assert_eq!(out.stop, RunStop::EndTurn);
+    assert_eq!(*seen.0.lock().unwrap(), vec![1, 2]);
+}
+
+/// 各エージェントの既定設定の request: claude-opus-5-5、thinking adaptive、sampling の値と
+/// tool_choice は送らない。cache は research / codegen だけ。予算と回数は設定どおり
+#[tokio::test]
+async fn agent_settings_produce_the_expected_request_shape() {
+    use subagent::llm::{AgentKind, AgentLlmSettings};
+    for (kind, cache) in [
+        (AgentKind::Research, true),
+        (AgentKind::CodeGen, true),
+        (AgentKind::Review, false),
+        (AgentKind::Document, false),
+    ] {
+        let s = AgentLlmSettings::defaults(kind);
+        let llm = Arc::new(ScriptedLlm::new(vec![resp(
+            StopReason::EndTurn,
+            vec![text("ok")],
+        )]));
+        let limits = s.runner_limits(tokio::time::Instant::now() + Duration::from_secs(60));
+        assert_eq!(limits.max_iterations, s.max_iterations);
+        assert_eq!(
+            limits.token_budget.as_ref().unwrap().limit(),
+            s.token_budget
+        );
+        let template = s.request_template(
+            Some("system".into()),
+            vec![ToolDef::custom("lookup", "look up", schema())],
+        );
+        ConversationRunner::new(llm.clone(), template, Arc::new(Recorder::default()))
+            .with_limits(limits)
+            .run(vec![Message::user_text("go")])
+            .await
+            .unwrap();
+        let req = &llm.requests()[0];
+        assert_eq!(req["model"], "claude-opus-5-5", "{kind:?}");
+        assert_eq!(req["thinking"], json!({"type": "adaptive"}), "{kind:?}");
+        assert_eq!(req["max_tokens"], s.max_tokens, "{kind:?}");
+        assert_eq!(req["tools"][0]["name"], "lookup");
+        assert_eq!(req.get("cache_control").is_some(), cache, "{kind:?}");
+        for k in [
+            "temperature",
+            "top_p",
+            "top_k",
+            "tool_choice",
+            "stop_sequences",
+        ] {
+            assert!(req.get(k).is_none(), "{kind:?} {k}: {req}");
+        }
+    }
+}

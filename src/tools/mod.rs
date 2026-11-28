@@ -143,7 +143,7 @@ impl Tool for BashTool {
         "bash_tool"
     }
     fn description(&self) -> &str {
-        "Bashコマンドを実行"
+        "許可された program を shell を通さずに実行する（SUBAGENT_CODEGEN_ALLOWED_COMMANDS にある名前だけ。command は program と引数）"
     }
     fn parameters(&self) -> &JsonMap {
         &self.params

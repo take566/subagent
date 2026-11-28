@@ -1,0 +1,239 @@
+{
+  "initialize": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {
+      "tools": {}
+    },
+    "serverInfo": {
+      "name": "CodeGenAgent",
+      "version": "1.0.0"
+    }
+  },
+  "tools_list": {
+    "hermes": [
+      {
+        "name": "codegen",
+        "description": "workspace（SUBAGENT_ROOTS）の中でコードを書く・直す",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "task": {
+              "type": "string",
+              "description": "作るもの・直すことの説明"
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "関係するファイル（workspace からの相対パス）"
+            },
+            "allow_commands": {
+              "type": "boolean",
+              "description": "allowlist（SUBAGENT_CODEGEN_ALLOWED_COMMANDS）のコマンドの実行を許すか（既定 false）"
+            }
+          },
+          "required": [
+            "task"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "full": [
+      {
+        "name": "file_create",
+        "description": "ファイルを作成",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "required": true
+            },
+            "content": {
+              "type": "string",
+              "required": true
+            }
+          }
+        }
+      },
+      {
+        "name": "bash_tool",
+        "description": "許可された program を shell を通さずに実行する（SUBAGENT_CODEGEN_ALLOWED_COMMANDS にある名前だけ。command は program と引数）",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "required": true
+            },
+            "cwd": {
+              "type": "string",
+              "required": false
+            }
+          }
+        }
+      },
+      {
+        "name": "str_replace",
+        "description": "文字列を置換",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "required": true
+            },
+            "search": {
+              "type": "string",
+              "required": true
+            },
+            "replace": {
+              "type": "string",
+              "required": true
+            }
+          }
+        }
+      },
+      {
+        "name": "execute",
+        "description": "タスクを実行",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "task_id": {
+              "type": "string",
+              "description": "タスクID"
+            },
+            "action": {
+              "type": "string",
+              "description": "アクション名"
+            },
+            "parameters": {
+              "type": "object",
+              "description": "パラメータ"
+            }
+          }
+        }
+      },
+      {
+        "name": "codegen",
+        "description": "workspace（SUBAGENT_ROOTS）の中でコードを書く・直す",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "task": {
+              "type": "string",
+              "description": "作るもの・直すことの説明"
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "関係するファイル（workspace からの相対パス）"
+            },
+            "allow_commands": {
+              "type": "boolean",
+              "description": "allowlist（SUBAGENT_CODEGEN_ALLOWED_COMMANDS）のコマンドの実行を許すか（既定 false）"
+            }
+          },
+          "required": [
+            "task"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  "typed_errors": [
+    {
+      "case": "unexpected_field",
+      "call": {
+        "name": "codegen",
+        "arguments": {
+          "task": "add two numbers",
+          "nope": 1
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: unexpected field `nope`"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "wrong_type",
+      "call": {
+        "name": "codegen",
+        "arguments": {
+          "task": "x",
+          "allow_commands": "yes"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: field `allow_commands` must be of type \"boolean\""
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "not_configured",
+      "call": {
+        "name": "codegen",
+        "arguments": {
+          "task": "add two numbers"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: LLM is not configured (set SUBAGENT_ANTHROPIC_API_KEY)"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "missing_required",
+      "call": {
+        "name": "codegen",
+        "arguments": {}
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: missing required field `task`"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "case": "missing_arguments",
+      "call": {
+        "name": "codegen"
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Missing arguments"
+          }
+        ],
+        "isError": true
+      }
+    }
+  ]
+}

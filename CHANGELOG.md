@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Phase 3a（エージェントを LLM につなぐ土台）
+- MCP の `SUBAGENT_MCP_MODE`: 既定の `hermes` は各 server の typed tool（`research` / `codegen` / `review` / `document`）だけを公開し、direct tool と `execute` の呼び出しを拒否する。`full` 以外の値は `hermes`（fail closed）。**既定の挙動の変更**: 従来のツールを使うには `SUBAGENT_MCP_MODE=full`
+- typed tool（inputSchema は `additionalProperties: false` と `required`。server 側でも検証して `Error: Invalid arguments: ...`）。今は引数を既存の `execute` に写す仮実装で、LLM が未設定なら mock の結果を返さずに `LLM is not configured` の isError
+- `SUBAGENT_DEADLINE_SECS`（既定 540）: request を受けた時から数えて tools/call を打ち切る（同時実行数の待ちを含む）。client の `notifications/cancelled` でも打ち切る。エージェントの `behavior.timeout` は既定で無くなり（以前は 30〜120 秒、使われていなかった）、設定した時だけ deadline を縮める
+- `notifications/progress`: `_meta.progressToken` 付きの request に開始・runner の往復ごと・終了を送る（1 ずつ増える。終了は応答の前、応答の後は送らない）
+- `Subagent::typed_tool` / `Subagent::call_typed` と `core::CallCtx`（deadline / `ProgressSink` / `CancellationToken`）、`core::ProgressNotifier`
+- `llm::RunObserver` と `ConversationRunner::with_observer`（往復ごとに呼ぶ）
+- `llm::AgentLlmSettings`（model / max_tokens / effort / token_budget / max_iterations / cache。エージェントごとの既定と `SUBAGENT_[<AGENT>_]MODEL` / `_EFFORT` / `_TOKEN_BUDGET`）、`llm::AgentLlm`、`llm::AgentKind`
+- 各エージェントの `with_llm(client, settings)`（`new()` などの既定は `UnconfiguredLlm`）。`ReviewAgent::with_lint_command`（bin は `SUBAGENT_REVIEW_LINT_COMMAND`）
+- bin は `llm::client_from_env` で client を 1 つ作る。`SUBAGENT_LLM_BACKEND`（空 / `anthropic` / `replay`）、`replay` は feature `replay` 付きの build だけで `SUBAGENT_LLM_REPLAY_FILE` を読む。不明な値・feature なしの `replay`・不正な effort / 予算では起動しない（exit code 2）
+- `SUBAGENT_MAX_TOKENS_PER_DAY` は server process ごとの上限（4 server は別々に数える）であることを README に明記
+- `mcp::run_stdio` は `AgentKind` と `|config, client, settings|` の build を取る（signature の変更）
+- `execute` の既定の task id は `task-<uuid>`（以前は `task-<ミリ秒>`）
+- `bash_tool`（CodeGen）の説明を「許可された program を shell を通さずに実行する ...」に直した（shell は使っていない）
+- test: TS 版の golden を `tests/golden/ts/` に移し、`full` で比べる。Rust 版の golden（`tests/golden/rust/`、`GOLDEN_BLESS=1`）を追加。golden の子プロセスは API 鍵と `SUBAGENT_*` / `ANTHROPIC_*` を外し、proxy を `127.0.0.1:9` に向ける
+- 依存: `tokio-util`（`CancellationToken`。rmcp が既に使っている版）、dev の tokio に `test-util`（paused time）
+
 ### 追加
 - `sandbox` モジュール（`Workspace` / `run_command` / `Sandbox`）。ファイル操作を `SUBAGENT_ROOTS` の中に閉じ込め、コマンドを allowlist の program だけに絞る
   - `Workspace::resolve` は絶対パス・`..`・`C:`・`\\?\` / UNC・`:`（代替データストリーム）・Windows の予約名（拡張子付きも）・末尾のドット / 空白を拒否し、最寄りの既存祖先を canonicalize して root の中か確かめる。open 後に handle の実パス（Windows `GetFinalPathNameByHandleW`、Linux `/proc/self/fd`、macOS `F_GETPATH`）も確かめる

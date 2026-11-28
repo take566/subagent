@@ -39,6 +39,13 @@ pub trait ToolHandler: Send + Sync {
     async fn call(&self, name: &str, input: &Value) -> std::result::Result<String, String>;
 }
 
+/// 往復ごとに呼ばれる（MCP の進捗通知に使う。[`crate::core::ProgressSink`] が実装する）
+#[async_trait]
+pub trait RunObserver: Send + Sync {
+    /// API の応答を 1 つ受け取るたびに呼ばれる（`iteration` は 1 始まり）
+    async fn on_iteration(&self, iteration: u32, response: &MessageResponse);
+}
+
 /// 打ち切りの条件
 #[derive(Debug, Clone)]
 pub struct RunnerLimits {
@@ -112,6 +119,7 @@ pub struct ConversationRunner {
     template: MessageRequest,
     handler: Arc<dyn ToolHandler>,
     limits: RunnerLimits,
+    observer: Option<Arc<dyn RunObserver>>,
 }
 
 impl ConversationRunner {
@@ -126,11 +134,18 @@ impl ConversationRunner {
             template,
             handler,
             limits: RunnerLimits::default(),
+            observer: None,
         }
     }
 
     pub fn with_limits(mut self, limits: RunnerLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// 往復ごとに `observer` を呼ぶ（応答を受け取った直後、tool を実行する前）
+    pub fn with_observer(mut self, observer: Arc<dyn RunObserver>) -> Self {
+        self.observer = Some(observer);
         self
     }
 
@@ -183,6 +198,15 @@ impl ConversationRunner {
             state.add_usage(&resp.usage);
             if let Some(b) = &self.limits.token_budget {
                 b.charge(resp.usage.total());
+            }
+            if let Some(o) = &self.observer
+                && self
+                    .with_deadline(o.on_iteration(state.iterations, &resp))
+                    .await
+                    .is_none()
+            {
+                state.last = Some(resp);
+                return Ok(state.finish(RunStop::Deadline));
             }
 
             let tool_uses = match resp.tool_uses() {
@@ -357,12 +381,24 @@ fn text_of(content: &[Value]) -> String {
 }
 
 /// tool 入力の簡易検証（object・required・1 段目の type / enum・additionalProperties:false）
-fn validate_input(def: &ToolDef, input: &Value) -> std::result::Result<(), String> {
+pub(crate) fn validate_input(def: &ToolDef, input: &Value) -> std::result::Result<(), String> {
+    let ToolDef::Custom { input_schema, .. } = def else {
+        if !input.is_object() {
+            return Err("input must be a JSON object".into());
+        }
+        return Ok(());
+    };
+    validate_against_schema(input_schema, input)
+}
+
+/// JSON schema の簡易検証（object・required・1 段目の type / enum・array の items の type・
+/// additionalProperties:false）。MCP の typed tool の引数も server 側でこれで確かめる
+pub(crate) fn validate_against_schema(
+    input_schema: &Value,
+    input: &Value,
+) -> std::result::Result<(), String> {
     let Some(obj) = input.as_object() else {
         return Err("input must be a JSON object".into());
-    };
-    let ToolDef::Custom { input_schema, .. } = def else {
-        return Ok(());
     };
     let empty = Map::new();
     let props = input_schema
@@ -403,6 +439,13 @@ fn validate_input(def: &ToolDef, input: &Value) -> std::result::Result<(), Strin
                 "field `{key}` must be one of {}",
                 Value::from(allowed.clone())
             ));
+        }
+        if let (Some(items), Some(Value::String(item_ty))) = (
+            value.as_array(),
+            prop.get("items").and_then(|i| i.get("type")),
+        ) && !items.iter().all(|x| type_matches(item_ty, x))
+        {
+            return Err(format!("items of `{key}` must be of type {item_ty}"));
         }
     }
     Ok(())
