@@ -109,6 +109,12 @@ impl AgentBase {
     }
 
     /// ツールを呼び出し
+    ///
+    /// ログには [`Self::task_logger`] で task_id / correlation_id / status / duration を付ける。
+    ///
+    /// 既知の制限: task_id は `current_task` から取るので、同じエージェントで複数タスクが
+    /// 並行して動くと、別タスクの task_id / correlation_id が載ることがある（TS 版も同じ。
+    /// take566/subagent#69）。
     pub async fn call_tool(&self, name: &str, params: JsonMap) -> Result<Value> {
         let tool = self
             .tools
@@ -150,6 +156,10 @@ impl AgentBase {
     }
 
     /// 実行中タスクの task_id / correlation_id を載せたロガー（TS の `taskLogger()`）
+    ///
+    /// `current_task` はエージェントに 1 つしかないため、並列実行中は最後に始まったタスクの
+    /// 値になる（take566/subagent#69）。task_id が分かっている箇所は `report_progress` のように
+    /// 明示的に渡す方が正確。
     pub fn task_logger(&self) -> Logger {
         match &lock(&self.state).current_task {
             Some(task) => self.logger.child(LogContext::task(

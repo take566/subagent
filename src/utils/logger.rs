@@ -109,7 +109,8 @@ impl LogFields {
     }
 }
 
-/// テスト用: stderr の代わりにログ行を貯める先
+/// テスト用: stderr の代わりにログ行を貯める先（`Logger::capturing` で作る。crate 内テスト専用）
+#[doc(hidden)]
 pub type LogSink = Arc<Mutex<Vec<String>>>;
 
 #[derive(Debug, Clone)]
@@ -140,8 +141,9 @@ impl Logger {
     }
 
     /// テスト用: stderr に書かず、整形済みのログ行を返り値の sink に貯めるロガー。
-    /// `SUBAGENT_LOG_LEVEL` は見ない。
-    pub fn capturing(agent_id: Option<String>, level: LogLevel) -> (Self, LogSink) {
+    /// `SUBAGENT_LOG_LEVEL` は見ない。crate 内の単体テスト専用（公開 API ではない）。
+    #[cfg(test)]
+    pub(crate) fn capturing(agent_id: Option<String>, level: LogLevel) -> (Self, LogSink) {
         let sink = LogSink::default();
         let logger = Logger {
             agent_id,
@@ -154,7 +156,9 @@ impl Logger {
 
     /// task_id / correlation_id を固定した子ロガーを返す（親は変わらない）。
     ///
-    /// 子の値が `None` のときは親の値を引き継ぐ。
+    /// 子の値が `None` のときは親の値を引き継ぐ。TS の `{ ...this.context, ...context }` は
+    /// `undefined` の値でも親を上書きする（例: `child({ correlation_id: undefined })` で消える）が、
+    /// Rust 版は意図して引き継ぐ側に倒している。値を消す手段は無い。
     pub fn child(&self, context: LogContext) -> Logger {
         Logger {
             context: LogContext {

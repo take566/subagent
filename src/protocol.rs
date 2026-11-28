@@ -39,14 +39,37 @@ fn js_string(v: &Value) -> String {
 
 /// `Date.parse` が NaN にならない文字列か。
 ///
-/// JS の `Date.parse` は実装依存の書式も受けるが、ここでは ISO 8601 系
-/// （RFC 3339、タイムゾーン無しの日時、日付のみ）を有効とする。
+/// 有効とする書式（日付と時刻の区切りは `T` でも空白でもよい。V8 の `Date.parse` と同じ）:
+/// - RFC 3339（`Z` / `±hh:mm` 付き、小数秒可）
+/// - タイムゾーン無しの日時（`YYYY-MM-DDThh:mm[:ss[.f]]`）
+/// - 日付のみ（`YYYY-MM-DD`）
+///
+/// うるう秒（`:60`）や存在しない日付・時刻は `Date.parse` と同じく無効。
+///
+/// 意図して TS と違う点: `Date.parse` が実装依存で受ける ISO 8601 以外の書式
+/// （`Tue, 01 Jan 2024 ...`、`2024/01/01`、`Jan 1 2024`、年のみ `2024`、年月のみ `2024-01`、
+/// 拡張年 `+002024-...` など）は無効とする。
 fn is_valid_date(s: &str) -> bool {
-    use chrono::{DateTime, NaiveDate, NaiveDateTime};
-    DateTime::parse_from_rfc3339(s).is_ok()
-        || NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f").is_ok()
-        || NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M").is_ok()
-        || NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
+    use chrono::{DateTime, NaiveDate, NaiveDateTime, Timelike};
+    // 日付と時刻の間の空白を `T` にそろえる
+    let normalized;
+    let s = if s.len() > 10 && s.is_char_boundary(10) && s.as_bytes()[10] == b' ' {
+        normalized = format!("{}T{}", &s[..10], &s[11..]);
+        normalized.as_str()
+    } else {
+        s
+    };
+    // chrono はうるう秒を nanosecond >= 1_000_000_000 で表す
+    let not_leap = |nanos: u32| nanos < 1_000_000_000;
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return not_leap(dt.nanosecond());
+    }
+    for fmt in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M"] {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
+            return not_leap(dt.nanosecond());
+        }
+    }
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
 }
 
 /// 種別ごとのペイロード検証（TS の `validatePayload`）
@@ -592,5 +615,70 @@ mod tests {
     fn is_message_mirrors_validation() {
         assert!(A2AProtocol::is_message(&req()));
         assert!(!A2AProtocol::is_message(&json!({})));
+    }
+
+    /// TS の Date.parse と揃える境界（V8 で確認できる代表例）
+    #[test]
+    fn timestamp_boundaries() {
+        let ok =
+            |ts: &str| A2AProtocol::validate_value(&with(&req(), "timestamp", Some(json!(ts))));
+        // Date.parse は空白区切りも受ける
+        for ts in [
+            "2024-01-01 00:00:00",
+            "2024-01-01 00:00:00.123",
+            "2024-01-01 00:00:00Z",
+            "2024-01-01 09:00:00+09:00",
+        ] {
+            assert_eq!(ok(ts), Ok(()), "{ts}");
+        }
+        // Date.parse はうるう秒・範囲外の値を NaN にする
+        for ts in [
+            "2024-12-31T23:59:60Z",
+            "2024-12-31T23:59:60",
+            "2024-12-31 23:59:60",
+            "2024-12-31T23:59:60.500+09:00",
+            "2024-02-30T00:00:00Z",
+            "2024-01-01T24:00:01Z",
+            "nope",
+        ] {
+            assert_eq!(
+                ok(ts),
+                Err("timestamp must be a valid date string".into()),
+                "{ts}"
+            );
+        }
+    }
+
+    /// TS #38 のケース: task_result の payload `{}`、parameters 欠落の task_request
+    #[test]
+    fn rejects_empty_task_result_payload_and_missing_parameters() {
+        assert_eq!(
+            err(&with(&result_msg(), "payload", Some(json!({})))),
+            "task_result payload: task_id must be a non-empty string"
+        );
+        assert_eq!(
+            err(&with(
+                &req(),
+                "payload",
+                Some(json!({ "task_id": "t", "action": "a" }))
+            )),
+            "task_request payload: parameters must be an object"
+        );
+    }
+
+    /// 検証（TS と同じ範囲）は通るが、Rust の構造体の型に合わないため deserialize だけ失敗する例。
+    /// TS の検証は request の status や metadata.priority の値を見ない。
+    #[test]
+    fn valid_per_ts_but_rejected_by_deserialize() {
+        for (key, v) in [
+            ("status", json!("bogus")),
+            ("metadata", json!({ "priority": "bogus" })),
+        ] {
+            let m = with(&req(), key, Some(v));
+            assert!(A2AProtocol::is_message(&m), "{key}");
+            assert_eq!(A2AProtocol::validate_value(&m), Ok(()));
+            let e = A2AProtocol::deserialize(&m.to_string()).unwrap_err();
+            assert!(e.starts_with("Invalid A2A message: "), "{e}");
+        }
     }
 }
