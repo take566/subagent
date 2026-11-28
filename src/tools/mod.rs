@@ -1,4 +1,9 @@
 //! 組み込みツール実装（複数のエージェントで共有）
+//!
+//! ファイルを扱うツール（`file_create` / `str_replace` / `view`）は [`Workspace`] を、
+//! コマンドを実行するツール（`bash_tool`）は [`Sandbox::run_line`] を通す。
+//! `SUBAGENT_ROOTS` が無ければ拒否し、コマンドは `SUBAGENT_CODEGEN_ALLOWED_COMMANDS` にある
+//! program だけを shell なしで実行する（[`crate::sandbox`]）。
 
 pub mod lint_parsers;
 pub mod notion;
@@ -7,11 +12,11 @@ pub use notion::{NotionClient, NotionPageCreateTool, NotionPageUpdateTool};
 
 use crate::core::tool::{Tool, param_defs};
 use crate::error::{Error, Result};
+use crate::sandbox::{CommandOutput, Sandbox, Workspace};
 use crate::types::{JsonMap, js_len};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::sync::Arc;
 
 /// 必須の文字列パラメータを取得
 pub fn required_str<'a>(params: &'a JsonMap, key: &str) -> Result<&'a str> {
@@ -26,31 +31,33 @@ pub fn optional_str<'a>(params: &'a JsonMap, key: &str) -> Option<&'a str> {
     params.get(key).and_then(Value::as_str)
 }
 
-/// `base_dir` 基準で絶対パスにする（TS の `path.resolve` 相当）
-pub fn resolve_path(base_dir: Option<&Path>, p: &str) -> Result<PathBuf> {
-    let joined = match base_dir {
-        Some(base) => base.join(p),
-        None => PathBuf::from(p),
-    };
-    Ok(std::path::absolute(joined)?)
+/// Workspace の（同期の）操作を blocking thread で実行する
+async fn on_workspace<T, F>(sandbox: &Sandbox, f: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&Workspace) -> Result<T> + Send + 'static,
+{
+    let ws = sandbox.workspace()?;
+    tokio::task::spawn_blocking(move || f(&ws))
+        .await
+        .map_err(|e| Error::other(format!("workspace task failed: {e}")))?
 }
 
 // ---------------------------------------------------------------------------
 // file_create
 // ---------------------------------------------------------------------------
 
-/// ファイル作成ツール
+/// ファイル作成ツール（workspace 内の相対 path だけ）
 pub struct FileCreateTool {
     params: JsonMap,
-    base_dir: Option<PathBuf>,
+    sandbox: Arc<Sandbox>,
 }
 
 impl FileCreateTool {
-    /// `base_dir` が None ならカレントディレクトリ基準
-    pub fn new(base_dir: Option<PathBuf>) -> Self {
+    pub fn new(sandbox: Arc<Sandbox>) -> Self {
         FileCreateTool {
             params: param_defs(&[("path", "string", true), ("content", "string", true)]),
-            base_dir,
+            sandbox,
         }
     }
 }
@@ -68,21 +75,18 @@ impl Tool for FileCreateTool {
     }
 
     async fn invoke(&self, params: JsonMap) -> Result<Value> {
-        let path = required_str(&params, "path")?;
-        let content = required_str(&params, "content")?;
-        let full = resolve_path(self.base_dir.as_deref(), path)?;
-        if let Some(dir) = full.parent() {
-            tokio::fs::create_dir_all(dir)
-                .await
-                .map_err(|e| Error::io_at(dir, e))?;
-        }
-        tokio::fs::write(&full, content)
-            .await
-            .map_err(|e| Error::io_at(&full, e))?;
+        let path = required_str(&params, "path")?.to_string();
+        let content = required_str(&params, "content")?.to_string();
+        let size = js_len(&content);
+        let shown = on_workspace(&self.sandbox, move |ws| {
+            ws.create(&path, &content)?;
+            ws.display_path(&path)
+        })
+        .await?;
         Ok(json!({
-            "path": full.to_string_lossy(),
+            "path": shown.to_string_lossy(),
             "created": true,
-            "size": js_len(content),
+            "size": size,
         }))
     }
 }
@@ -91,72 +95,41 @@ impl Tool for FileCreateTool {
 // bash_tool / lint
 // ---------------------------------------------------------------------------
 
-/// シェルコマンドの実行結果
-#[derive(Debug, Clone)]
-pub struct ShellOutput {
-    pub success: bool,
-    pub stdout: String,
-    pub stderr: String,
-    /// 失敗時のメッセージ（Node の `exec` と同じ `Command failed: ...` 形式）
-    pub error: Option<String>,
-}
-
-/// シェル経由でコマンドを実行する（Node の `child_process.exec` 相当）。
-/// Windows は `cmd.exe /d /s /c "<command>"`、それ以外は `/bin/sh -c`。
-/// stdin は必ず null にする（MCP サーバーの stdin を子プロセスに奪わせない）。
-pub async fn run_shell(command: &str, cwd: Option<&str>) -> Result<ShellOutput> {
-    #[cfg(windows)]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("cmd.exe");
-        c.args(["/d", "/s", "/c"]);
-        c.raw_arg(format!("\"{command}\""));
-        c
-    };
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("/bin/sh");
-        c.args(["-c", command]);
-        c
-    };
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
+/// 実行結果の共通部分（`success` / `error` / `stdout` / `stderr`）
+fn command_json(command: &str, out: &CommandOutput) -> JsonMap {
+    let mut m = JsonMap::new();
+    m.insert("success".into(), json!(out.success));
+    if !out.success {
+        let error = if out.timed_out {
+            format!("Command timed out: {command}")
+        } else {
+            format!("Command failed: {command}\n{}", out.stderr)
+        };
+        m.insert("error".into(), json!(error));
     }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    let out = match cmd.output().await {
-        Ok(o) => o,
-        Err(e) => {
-            return Ok(ShellOutput {
-                success: false,
-                stdout: String::new(),
-                stderr: String::new(),
-                error: Some(e.to_string()),
-            });
-        }
-    };
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    let error = (!out.status.success()).then(|| format!("Command failed: {command}\n{stderr}"));
-    Ok(ShellOutput {
-        success: out.status.success(),
-        stdout,
-        stderr,
-        error,
-    })
+    m.insert("stdout".into(), json!(out.stdout));
+    m.insert("stderr".into(), json!(out.stderr));
+    if out.timed_out {
+        m.insert("timed_out".into(), json!(true));
+    }
+    if out.truncated {
+        m.insert("truncated".into(), json!(true));
+    }
+    m
 }
 
-/// Bash 実行ツール
+/// コマンド実行ツール。名前は互換のため `bash_tool` だが shell は使わない
+/// （`command` は program と引数。`cwd` は workspace 内の相対 path）
 pub struct BashTool {
     params: JsonMap,
+    sandbox: Arc<Sandbox>,
 }
 
-impl Default for BashTool {
-    fn default() -> Self {
+impl BashTool {
+    pub fn new(sandbox: Arc<Sandbox>) -> Self {
         BashTool {
             params: param_defs(&[("command", "string", true), ("cwd", "string", false)]),
+            sandbox,
         }
     }
 }
@@ -175,28 +148,25 @@ impl Tool for BashTool {
 
     async fn invoke(&self, params: JsonMap) -> Result<Value> {
         let command = required_str(&params, "command")?;
-        let out = run_shell(command, optional_str(&params, "cwd")).await?;
-        Ok(match out.error {
-            None => json!({ "success": true, "stdout": out.stdout, "stderr": out.stderr }),
-            Some(err) => json!({
-                "success": false,
-                "error": err,
-                "stdout": out.stdout,
-                "stderr": out.stderr,
-            }),
-        })
+        let out = self
+            .sandbox
+            .run_line(command, optional_str(&params, "cwd"))
+            .await?;
+        Ok(Value::Object(command_json(command, &out)))
     }
 }
 
-/// Lint 実行ツール（ツール名は TS 版と同じく `bash_tool`）
+/// Lint 実行ツール（ツール名は TS 版と同じく `bash_tool`。実行は [`BashTool`] と同じ制限）
 pub struct LintTool {
     params: JsonMap,
+    sandbox: Arc<Sandbox>,
 }
 
-impl Default for LintTool {
-    fn default() -> Self {
+impl LintTool {
+    pub fn new(sandbox: Arc<Sandbox>) -> Self {
         LintTool {
             params: param_defs(&[("command", "string", true), ("cwd", "string", false)]),
+            sandbox,
         }
     }
 }
@@ -225,26 +195,17 @@ impl Tool for LintTool {
 
     async fn invoke(&self, params: JsonMap) -> Result<Value> {
         let command = required_str(&params, "command")?;
-        let out = run_shell(command, optional_str(&params, "cwd")).await?;
+        let out = self
+            .sandbox
+            .run_line(command, optional_str(&params, "cwd"))
+            .await?;
         // TS は stdout だけを見ていたが、cargo clippy のように指摘を stderr に出すツールも
         // あるので両方を解釈する（stdout → stderr の順。言語の推定はそれぞれ別に行う）
         let mut issues = parse_lint_output(&out.stdout);
         issues.extend(parse_lint_output(&out.stderr));
-        Ok(match out.error {
-            None => json!({
-                "success": true,
-                "stdout": out.stdout,
-                "stderr": out.stderr,
-                "issues": issues,
-            }),
-            Some(err) => json!({
-                "success": false,
-                "error": err,
-                "stdout": out.stdout,
-                "stderr": out.stderr,
-                "issues": issues,
-            }),
-        })
+        let mut m = command_json(command, &out);
+        m.insert("issues".into(), Value::Array(issues));
+        Ok(Value::Object(m))
     }
 }
 
@@ -252,25 +213,26 @@ impl Tool for LintTool {
 // str_replace
 // ---------------------------------------------------------------------------
 
-/// 文字列置換ツール。
+/// 文字列置換ツール（workspace 内の相対 path だけ）。
 ///
 /// `search` はリテラル文字列として扱い（正規表現ではない）、`replace` 内の `$1` `$&` なども
-/// 置換パターンとして解釈せずそのまま書き込む（TS #53）。一致が 0 件ならファイルを書き戻さず
-/// `replaced: false` を返す。
+/// 置換パターンとして解釈せずそのまま書き込む（TS #53）。一致はすべて置き換える。
+/// 一致が 0 件ならファイルを書き戻さず `replaced: false` を返す。
+/// （「ちょうど 1 回」の置換は [`Workspace::str_replace`]）
 pub struct StrReplaceTool {
     params: JsonMap,
-    base_dir: Option<PathBuf>,
+    sandbox: Arc<Sandbox>,
 }
 
 impl StrReplaceTool {
-    pub fn new(base_dir: Option<PathBuf>) -> Self {
+    pub fn new(sandbox: Arc<Sandbox>) -> Self {
         StrReplaceTool {
             params: param_defs(&[
                 ("file", "string", true),
                 ("search", "string", true),
                 ("replace", "string", true),
             ]),
-            base_dir,
+            sandbox,
         }
     }
 }
@@ -288,27 +250,15 @@ impl Tool for StrReplaceTool {
     }
 
     async fn invoke(&self, params: JsonMap) -> Result<Value> {
-        let file = required_str(&params, "file")?;
-        let search = required_str(&params, "search")?;
-        let replace = required_str(&params, "replace")?;
-        let path = resolve_path(self.base_dir.as_deref(), file)?;
-        let content = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| Error::io_at(&path, e))?;
-        // TS の split/join と同じく、重ならない一致を左から数える。空文字列は 0 件
-        let occurrences = if search.is_empty() {
-            0
-        } else {
-            content.matches(search).count()
-        };
-        if occurrences == 0 {
-            return Ok(json!({ "file": file, "replaced": false, "occurrences": 0 }));
-        }
-        let new_content = content.replace(search, replace);
-        tokio::fs::write(&path, new_content.as_bytes())
-            .await
-            .map_err(|e| Error::io_at(&path, e))?;
-        Ok(json!({ "file": file, "replaced": true, "occurrences": occurrences }))
+        let file = required_str(&params, "file")?.to_string();
+        let search = required_str(&params, "search")?.to_string();
+        let replace = required_str(&params, "replace")?.to_string();
+        let f = file.clone();
+        let occurrences = on_workspace(&self.sandbox, move |ws| {
+            ws.replace_all(&f, &search, &replace)
+        })
+        .await?;
+        Ok(json!({ "file": file, "replaced": occurrences > 0, "occurrences": occurrences }))
     }
 }
 
@@ -316,15 +266,17 @@ impl Tool for StrReplaceTool {
 // view
 // ---------------------------------------------------------------------------
 
-/// ファイル閲覧ツール
+/// ファイル閲覧ツール（workspace 内の相対 path だけ）
 pub struct ViewTool {
     params: JsonMap,
+    sandbox: Arc<Sandbox>,
 }
 
-impl Default for ViewTool {
-    fn default() -> Self {
+impl ViewTool {
+    pub fn new(sandbox: Arc<Sandbox>) -> Self {
         ViewTool {
             params: param_defs(&[("path", "string", true)]),
+            sandbox,
         }
     }
 }
@@ -342,10 +294,9 @@ impl Tool for ViewTool {
     }
 
     async fn invoke(&self, params: JsonMap) -> Result<Value> {
-        let path = required_str(&params, "path")?;
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| Error::io_at(path, e))?;
+        let path = required_str(&params, "path")?.to_string();
+        let p = path.clone();
+        let content = on_workspace(&self.sandbox, move |ws| ws.read_text(&p)).await?;
         Ok(json!({
             "path": path,
             "size": js_len(&content),
@@ -502,27 +453,49 @@ impl Tool for DocumentParserTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::{CommandPolicy, Workspace};
+    use std::path::Path;
 
     fn map(v: Value) -> JsonMap {
         v.as_object().unwrap().clone()
     }
 
+    fn sandbox_in(dir: &Path, policy: CommandPolicy) -> Arc<Sandbox> {
+        Arc::new(Sandbox::new(
+            Workspace::new(vec![dir.to_path_buf()]).unwrap(),
+            policy,
+        ))
+    }
+
+    fn files_only(dir: &Path) -> Arc<Sandbox> {
+        sandbox_in(dir, CommandPolicy::disabled())
+    }
+
+    /// roots 未設定の sandbox
+    fn no_roots() -> Arc<Sandbox> {
+        Arc::new(Sandbox::from_lookup(|_| None))
+    }
+
     #[tokio::test]
     async fn file_create_and_str_replace_and_view() {
         let dir = tempfile::tempdir().unwrap();
-        let base = Some(dir.path().to_path_buf());
-        let r = FileCreateTool::new(base.clone())
+        let sb = files_only(dir.path());
+        let r = FileCreateTool::new(sb.clone())
             .invoke(map(
                 json!({"path": "a/b.txt", "content": "foo foo bar 日本"}),
             ))
             .await
             .unwrap();
         assert_eq!(r["size"], 14); // UTF-16 単位（JS の length と同じ）
+        assert_eq!(
+            r["path"],
+            json!(dir.path().join("a").join("b.txt").to_string_lossy())
+        );
         let p = dir.path().join("a/b.txt");
         assert!(p.exists());
 
         // search はリテラル（TS #53）。`fo+` は正規表現として解釈されないので一致しない
-        let r = StrReplaceTool::new(base.clone())
+        let r = StrReplaceTool::new(sb.clone())
             .invoke(map(
                 json!({"file": "a/b.txt", "search": "fo+", "replace": "X"}),
             ))
@@ -534,7 +507,7 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "foo foo bar 日本");
 
-        let r = StrReplaceTool::new(base)
+        let r = StrReplaceTool::new(sb.clone())
             .invoke(map(
                 json!({"file": "a/b.txt", "search": "foo", "replace": "X"}),
             ))
@@ -546,12 +519,63 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "X X bar 日本");
 
-        let v = ViewTool::default()
-            .invoke(map(json!({"path": p.to_string_lossy()})))
+        let v = ViewTool::new(sb)
+            .invoke(map(json!({"path": "a/b.txt"})))
             .await
             .unwrap();
         assert_eq!(v["lines"], 1);
         assert_eq!(v["content"], "X X bar 日本");
+    }
+
+    #[tokio::test]
+    async fn file_tools_refuse_paths_outside_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("s.txt");
+        std::fs::write(&secret, "secret").unwrap();
+        let abs = secret.to_string_lossy().into_owned();
+        let sb = files_only(dir.path());
+        for e in [
+            ViewTool::new(sb.clone())
+                .invoke(map(json!({"path": abs})))
+                .await
+                .unwrap_err(),
+            FileCreateTool::new(sb.clone())
+                .invoke(map(json!({"path": "../s.txt", "content": "x"})))
+                .await
+                .unwrap_err(),
+            StrReplaceTool::new(sb)
+                .invoke(map(
+                    json!({"file": abs, "search": "secret", "replace": "x"}),
+                ))
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(matches!(e, Error::Sandbox(_)), "{e}");
+        }
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "secret");
+    }
+
+    #[tokio::test]
+    async fn file_tools_refuse_without_roots() {
+        for e in [
+            FileCreateTool::new(no_roots())
+                .invoke(map(json!({"path": "a.txt", "content": "x"})))
+                .await
+                .unwrap_err(),
+            ViewTool::new(no_roots())
+                .invoke(map(json!({"path": "a.txt"})))
+                .await
+                .unwrap_err(),
+            BashTool::new(Arc::new(Sandbox::from_lookup(|k| {
+                (k == "SUBAGENT_CODEGEN_ALLOWED_COMMANDS").then(|| "cargo".into())
+            })))
+            .invoke(map(json!({"command": "cargo --version"})))
+            .await
+            .unwrap_err(),
+        ] {
+            assert!(e.to_string().contains("SUBAGENT_ROOTS"), "{e}");
+        }
     }
 
     // --- StrReplaceTool (literal replace)。TS tests/agents/codegen-agent.test.ts の移植 ---
@@ -560,16 +584,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("target.txt");
         std::fs::write(&file, content).unwrap();
-        let f = file.to_string_lossy().into_owned();
-        let res = StrReplaceTool::new(None)
+        let res = StrReplaceTool::new(files_only(dir.path()))
             .invoke(map(
-                json!({"file": f, "search": search, "replace": replace}),
+                json!({"file": "target.txt", "search": search, "replace": replace}),
             ))
             .await
             .unwrap();
         let after = std::fs::read_to_string(&file).unwrap();
         // file は入力のまま返す
-        assert_eq!(res["file"], json!(f));
+        assert_eq!(res["file"], json!("target.txt"));
         (res, after)
     }
 
@@ -612,14 +635,18 @@ mod tests {
             .unwrap()
             .set_modified(old)
             .unwrap();
-        let f = file.to_string_lossy().into_owned();
 
-        let res = StrReplaceTool::new(None)
-            .invoke(map(json!({"file": f, "search": "nomatch", "replace": "X"})))
+        let res = StrReplaceTool::new(files_only(dir.path()))
+            .invoke(map(
+                json!({"file": "target.txt", "search": "nomatch", "replace": "X"}),
+            ))
             .await
             .unwrap();
 
-        assert_eq!(res, json!({"file": f, "replaced": false, "occurrences": 0}));
+        assert_eq!(
+            res,
+            json!({"file": "target.txt", "replaced": false, "occurrences": 0})
+        );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "unchanged");
         assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), old);
     }
@@ -635,7 +662,8 @@ mod tests {
 
     #[tokio::test]
     async fn io_errors_include_path() {
-        let e = ViewTool::default()
+        let dir = tempfile::tempdir().unwrap();
+        let e = ViewTool::new(files_only(dir.path()))
             .invoke(map(json!({"path": "definitely/missing.txt"})))
             .await
             .unwrap_err();
@@ -644,7 +672,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_param_is_error() {
-        let e = FileCreateTool::new(None)
+        let e = FileCreateTool::new(no_roots())
             .invoke(JsonMap::new())
             .await
             .unwrap_err();
@@ -652,33 +680,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bash_success_failure_and_quotes() {
-        let ok = BashTool::default()
-            .invoke(map(json!({"command": "echo \"hi there\""})))
+    async fn bash_is_disabled_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = BashTool::new(files_only(dir.path()))
+            .invoke(map(json!({"command": "echo hi"})))
             .await
-            .unwrap();
-        assert_eq!(ok["success"], true);
+            .unwrap_err();
+        assert!(
+            e.to_string().contains("SUBAGENT_CODEGEN_ALLOWED_COMMANDS"),
+            "{e}"
+        );
+    }
+
+    #[cfg(windows)]
+    const SHELL: (&str, &str, &str) = ("cmd", "cmd /c \"echo hi there\"", "cmd /c exit 3");
+    #[cfg(not(windows))]
+    const SHELL: (&str, &str, &str) = ("sh", "sh -c 'echo \"hi there\"'", "sh -c 'exit 3'");
+
+    #[tokio::test]
+    async fn bash_success_failure_and_quotes() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = BashTool::new(sandbox_in(dir.path(), CommandPolicy::allow(&[SHELL.0])));
+        let ok = tool.invoke(map(json!({"command": SHELL.1}))).await.unwrap();
+        assert_eq!(ok["success"], true, "{ok}");
         assert!(ok["stdout"].as_str().unwrap().contains("hi there"));
 
-        let bad = BashTool::default()
-            .invoke(map(json!({"command": "exit 3"})))
-            .await
-            .unwrap();
+        let bad = tool.invoke(map(json!({"command": SHELL.2}))).await.unwrap();
         assert_eq!(bad["success"], false);
         assert!(
             bad["error"]
                 .as_str()
                 .unwrap()
-                .starts_with("Command failed: exit 3")
+                .starts_with(&format!("Command failed: {}", SHELL.2))
+        );
+        // shell の構文は引用符の外では受け付けない
+        assert!(
+            tool.invoke(map(json!({"command": format!("{} && echo x", SHELL.1)})))
+                .await
+                .is_err()
+        );
+        // cwd は workspace の中だけ
+        assert!(
+            tool.invoke(map(json!({"command": SHELL.1, "cwd": ".."})))
+                .await
+                .is_err()
         );
     }
 
     #[tokio::test]
     async fn lint_tool_parses_stdout_and_stderr() {
-        let r = LintTool::default()
-            .invoke(map(json!({
-                "command": "echo a.py:1:2: E1 out&& echo b.py:3:4: W2 err 1>&2"
-            })))
+        #[cfg(windows)]
+        let command = "cmd /c \"echo a.py:1:2: E1 out&& echo b.py:3:4: W2 err 1>&2\"";
+        #[cfg(not(windows))]
+        let command = "sh -c 'echo a.py:1:2: E1 out; echo b.py:3:4: W2 err 1>&2'";
+        let dir = tempfile::tempdir().unwrap();
+        let r = LintTool::new(sandbox_in(dir.path(), CommandPolicy::allow(&[SHELL.0])))
+            .invoke(map(json!({ "command": command })))
             .await
             .unwrap();
         let issues = r["issues"].as_array().unwrap();

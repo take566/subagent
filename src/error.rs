@@ -35,6 +35,10 @@ pub enum Error {
     #[error("{0}")]
     Json(#[from] serde_json::Error),
 
+    /// sandbox（Workspace / run_command）が拒否した操作
+    #[error("Sandbox: {0}")]
+    Sandbox(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -50,6 +54,7 @@ impl Error {
             Error::Io(_) | Error::IoPath { .. } => "IoError",
             Error::Regex(_) => "RegexError",
             Error::Json(_) => "JsonError",
+            Error::Sandbox(_) => "SandboxError",
             Error::Other(_) => "Error",
         }
     }

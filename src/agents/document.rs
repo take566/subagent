@@ -3,6 +3,7 @@
 use crate::core::subagent::{AgentBase, Subagent};
 use crate::core::tool::Tool;
 use crate::error::{Error, Result};
+use crate::sandbox::Sandbox;
 use crate::tools::{FileCreateTool, NotionClient, NotionPageCreateTool, NotionPageUpdateTool};
 use crate::types::{
     Backoff, BehaviorConfig, ErrorAction, ErrorHandlingStrategy, InterfaceConfig, JsonMap,
@@ -63,22 +64,27 @@ impl DocumentAgent {
         }
     }
 
-    /// カレントディレクトリの `docs/` に出力するエージェント
+    /// `SUBAGENT_ROOTS` の workspace の `docs/` に出力するエージェント（未設定ならツールが拒否する）
     pub fn new() -> Self {
         Self::with_options(Self::default_config(), None)
     }
 
-    /// `base_dir` を指定すると `<base_dir>/docs/` に出力する
+    /// `base_dir` を指定すると `<base_dir>/docs/` に出力する（None は `SUBAGENT_ROOTS`）
     pub fn with_options(config: SubagentConfig, base_dir: Option<PathBuf>) -> Self {
         Self::with_tools(config, Self::default_tools(base_dir))
     }
 
     /// 既定のツール（file_create / notion_page_create / notion_page_update）。
+    /// `file_create` は `base_dir`（None は `SUBAGENT_ROOTS`）を workspace root にする。
     /// Notion ツールは実 API と環境変数 `NOTION_TOKEN`（呼び出し時に読む）を使う。
     pub fn default_tools(base_dir: Option<PathBuf>) -> Vec<Arc<dyn Tool>> {
+        let sandbox = match base_dir {
+            Some(dir) => Sandbox::with_root(dir),
+            None => Sandbox::from_env(),
+        };
         let notion = NotionClient::from_env();
         vec![
-            Arc::new(FileCreateTool::new(base_dir)),
+            Arc::new(FileCreateTool::new(Arc::new(sandbox))),
             Arc::new(NotionPageCreateTool::new(notion.clone())),
             Arc::new(NotionPageUpdateTool::new(notion)),
         ]

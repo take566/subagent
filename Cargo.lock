@@ -1543,6 +1543,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "libc",
  "rand",
  "regex",
  "reqwest",
@@ -1553,6 +1554,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

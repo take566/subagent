@@ -9,6 +9,7 @@ pub mod error;
 pub mod mcp;
 pub mod orchestrator;
 pub mod protocol;
+pub mod sandbox;
 pub mod tools;
 pub mod types;
 pub mod utils;

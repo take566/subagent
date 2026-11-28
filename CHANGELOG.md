@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+### 追加
+- `sandbox` モジュール（`Workspace` / `run_command` / `Sandbox`）。ファイル操作を `SUBAGENT_ROOTS` の中に閉じ込め、コマンドを allowlist の program だけに絞る
+  - `Workspace::resolve` は絶対パス・`..`・`C:`・`\\?\` / UNC・`:`（代替データストリーム）・Windows の予約名（拡張子付きも）・末尾のドット / 空白を拒否し、最寄りの既存祖先を canonicalize して root の中か確かめる。open 後に handle の実パス（Windows `GetFinalPathNameByHandleW`、Linux `/proc/self/fd`、macOS `F_GETPATH`）も確かめる
+  - text editor 向けの操作 `view`（行番号付き）/ `create` / `str_replace`（ちょうど 1 回だけ一致したときに置換）/ `insert`、作成・変更したファイルの追跡（`changes()`）、サイズ（`SUBAGENT_MAX_FILE_BYTES`、既定 1 MiB）と件数（`SUBAGENT_MAX_FILES`、既定 200）の上限
+  - `run_command` は既定で無効。`SUBAGENT_CODEGEN_ALLOWED_COMMANDS` の bare な program 名だけを shell なしで実行し、cwd は workspace、stdin は null、timeout（`SUBAGENT_COMMAND_TIMEOUT_SECS`、既定 120 秒）で kill、出力は 3 万文字で切る。子の env は `PATH`（相対 entry は除く）/ `HOME` / `USERPROFILE` / `TEMP` / `TMP` / `TMPDIR` / `SystemRoot` だけ
+- `Error::Sandbox`（`name()` は `SandboxError`）
+- `CodeGenAgent::with_sandbox` / `default_tools_in`、`ReviewAgent::with_sandbox` / `default_tools_in`
+- Review の `source_path` パラメータ（workspace 内の相対パスのファイルを読む）
+
+### 挙動の変更（sandbox）
+- `file_create` / `str_replace` / `view` は `SUBAGENT_ROOTS`（または `with_options` の `base_dir`）の中の相対パスだけを扱う。roots が無ければエラー（`SUBAGENT_ROOTS is not set ...`）を返し、カレントディレクトリには書かない。絶対パスや `..` はエラー。ツール名と引数の定義は変えていない
+- `file_create` の結果の `path` は「設定どおりの root + 相対パス」
+- `bash_tool`（CodeGen）と Review の lint（`bash_tool` / `lint_command`）は shell を通さなくなった（`cmd /d /s /c` / `/bin/sh -c` を廃止）。`SUBAGENT_CODEGEN_ALLOWED_COMMANDS` が無ければエラー。引用符の外の shell の構文（`|` `&&` `;` `>` `$(...)` など）はエラー。`cwd` は workspace 内の相対パス。時間切れなら `timed_out: true`、出力を切ったら `truncated: true` が付く。program を起動できなければツールのエラーになる（以前は `success: false`）
+- Review は絶対パスの `source_code` を読まなくなった（1 行で `/` 始まりか絶対パスならエラー）。ファイルは `source_path` で workspace 内の相対パスを渡す。複数行の `source_code` は `//` で始まってもコードとして扱う。`source_code` の interface 定義は `required: false` になった（`source_path` とどちらか）
+- lint が allowlist に無いなどで実行できないときは、これまでどおり warn を出して lint 無しで続ける
+- `FileCreateTool::new` / `StrReplaceTool::new` は `Arc<Sandbox>` を取る。`ViewTool` / `BashTool` / `LintTool` は `Default` をやめて `new(Arc<Sandbox>)` になった。`tools::run_shell` / `ShellOutput` / `resolve_path` は削除した
+- `CodeGenAgent::new()` / `DocumentAgent::new()` / `create_default_orchestrator()` は `SUBAGENT_ROOTS` を workspace にする（未設定ならファイルを作るタスクは失敗する）。`with_options(.., Some(dir))` は `dir` を root にする（無ければ作る）
+- テスト: golden の MCP サーバーは作業ディレクトリを `SUBAGENT_ROOTS` にして起動する（golden の記録は変えていない）
+
 ## [1.1.0] - 2026-11-28
 
 ### 変更

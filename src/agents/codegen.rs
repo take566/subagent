@@ -3,6 +3,7 @@
 use crate::core::subagent::{AgentBase, Subagent};
 use crate::core::tool::Tool;
 use crate::error::Result;
+use crate::sandbox::Sandbox;
 use crate::tools::{BashTool, FileCreateTool, StrReplaceTool, js_display};
 use crate::types::{
     Backoff, BehaviorConfig, ErrorAction, ErrorHandlingStrategy, InterfaceConfig, JsonMap,
@@ -72,22 +73,37 @@ impl CodeGenAgent {
         }
     }
 
-    /// カレントディレクトリにファイルを生成するエージェント
+    /// `SUBAGENT_ROOTS` の workspace にファイルを生成するエージェント（未設定ならツールが拒否する）
     pub fn new() -> Self {
         Self::with_options(Self::default_config(), None)
     }
 
-    /// `base_dir` を指定すると、相対パスはそこを基準に解決する
+    /// `base_dir` を指定するとそこを workspace root にする（None は `SUBAGENT_ROOTS`）
     pub fn with_options(config: SubagentConfig, base_dir: Option<PathBuf>) -> Self {
         Self::with_tools(config, Self::default_tools(base_dir))
     }
 
-    /// 既定のツール（file_create / bash_tool / str_replace）。相対パスは `base_dir` 基準
+    /// sandbox を指定して作る
+    pub fn with_sandbox(config: SubagentConfig, sandbox: Arc<Sandbox>) -> Self {
+        Self::with_tools(config, Self::default_tools_in(sandbox))
+    }
+
+    /// 既定のツール（file_create / bash_tool / str_replace）。
+    /// `base_dir` を workspace root にする（None は env の `SUBAGENT_ROOTS`）
     pub fn default_tools(base_dir: Option<PathBuf>) -> Vec<Arc<dyn Tool>> {
+        let sandbox = match base_dir {
+            Some(dir) => Sandbox::with_root(dir),
+            None => Sandbox::from_env(),
+        };
+        Self::default_tools_in(Arc::new(sandbox))
+    }
+
+    /// 既定のツールを、指定した sandbox で作る
+    pub fn default_tools_in(sandbox: Arc<Sandbox>) -> Vec<Arc<dyn Tool>> {
         vec![
-            Arc::new(FileCreateTool::new(base_dir.clone())),
-            Arc::new(BashTool::default()),
-            Arc::new(StrReplaceTool::new(base_dir)),
+            Arc::new(FileCreateTool::new(sandbox.clone())),
+            Arc::new(BashTool::new(sandbox.clone())),
+            Arc::new(StrReplaceTool::new(sandbox)),
         ]
     }
 
