@@ -33,8 +33,38 @@ pub enum LlmError {
     #[error("Claude API response could not be decoded: {0}")]
     Decode(String),
 
+    /// token 予算を使い切った（送信しない）
+    #[error("{scope} token budget exceeded: used {used} of {limit}")]
+    BudgetExceeded {
+        scope: BudgetScope,
+        used: u64,
+        limit: u64,
+    },
+
+    /// 設定値が不正
+    #[error("invalid LLM configuration: {0}")]
+    InvalidConfig(String),
+
     #[error("{0}")]
     Other(String),
+}
+
+/// どの予算を使い切ったか
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetScope {
+    /// 1 タスクの予算
+    Task,
+    /// process 単位の 1 日上限
+    Daily,
+}
+
+impl std::fmt::Display for BudgetScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            BudgetScope::Task => "task",
+            BudgetScope::Daily => "daily",
+        })
+    }
 }
 
 /// Messages API を呼ぶ client
