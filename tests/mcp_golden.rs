@@ -836,8 +836,9 @@ fn replay_backend_serves_typed_tools() {
         env!("CARGO_MANIFEST_DIR")
     );
     for (agent, bin) in all_bins() {
-        // research は空の記録では答えられない（LLM の経路。tests/research_agent.rs の replay_fixture_succeeds）
-        if agent == "research" {
+        // research と document は空の記録では答えられない（LLM の経路。research は tests/research_agent.rs の
+        // replay_fixture_succeeds、document は replay/document.json の document_replay_writes_the_document）
+        if agent == "research" || agent == "document" {
             continue;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -869,6 +870,56 @@ fn replay_backend_serves_typed_tools() {
     );
     assert_eq!(status.code(), Some(2), "{status}");
     assert!(stderr.contains("SUBAGENT_LLM_REPLAY_FILE"), "{stderr}");
+}
+
+/// replay backend: document の typed tool が記録した応答を workspace の docs/ に保存する
+#[cfg(feature = "replay")]
+#[test]
+fn document_replay_writes_the_document() {
+    let fixture = format!(
+        "{}/tests/golden/replay/document.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Client::spawn_rooted(
+        env!("CARGO_BIN_EXE_document-server"),
+        dir.path(),
+        &[
+            ("SUBAGENT_LLM_BACKEND", "replay"),
+            ("SUBAGENT_LLM_REPLAY_FILE", &fixture),
+            ("MAX_CONCURRENT", "1"),
+        ],
+    );
+    c.initialize();
+    let (err, text) = c.call(
+        "document",
+        json!({ "content": "write about replay", "title": "Replay" }),
+    );
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    let path = v["path"].as_str().unwrap();
+    assert!(
+        path.starts_with("docs/generated-") && path.ends_with(".md"),
+        "{v}"
+    );
+    let body = std::fs::read_to_string(dir.path().join(path)).unwrap();
+    assert_eq!(
+        body,
+        "# Replay\n\nA document written from the recorded response.\n"
+    );
+    assert_eq!(v["mode"], "llm");
+    assert_eq!(v["format"], "md");
+    assert_eq!(v["title"], "Replay");
+    assert_eq!(v["bytes"], body.len());
+    assert_eq!(v["tokens_used"], 150);
+    assert_eq!(v["stop_reason"], "end_turn");
+    // 記録は 1 つだけ: 2 回目は LLM のエラー（mock の出力は返さない）で、何も書かない
+    let (err, text) = c.call("document", json!({ "content": "again" }));
+    assert!(err, "{text}");
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("docs")).unwrap().count(),
+        1
+    );
 }
 
 // ---------------------------------------------------------------------------
