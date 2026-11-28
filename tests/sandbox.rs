@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use subagent::Error;
 use subagent::sandbox::{
-    ChangeKind, CommandPolicy, Workspace, WorkspaceLimits, child_env, run_command,
+    ChangeKind, CommandPolicy, Sandbox, Workspace, WorkspaceLimits, child_env, run_command,
     split_command_line, validate_relative,
 };
 
@@ -174,6 +174,7 @@ fn dir_link_escape_is_rejected() {
         w.resolve("out/not-yet/file.txt").unwrap_err(),
     ] {
         assert!(is_sandbox_err(&e), "{e}");
+        assert_no_leak(&e, outside.path());
     }
     assert!(!outside.path().join("new.txt").exists());
 }
@@ -216,6 +217,7 @@ fn verify_open_file_rejects_handle_outside_root() {
         .verify_open_file(&std::fs::File::open(&out).unwrap())
         .unwrap_err();
     assert!(is_sandbox_err(&e), "{e}");
+    assert_no_leak(&e, outside.path());
 }
 
 /// resolve した後に親 dir を外向きの link に差し替えても、open 後の再検証で止まる
@@ -237,6 +239,13 @@ fn swap_after_resolve_is_caught_on_open() {
     }
     let e = w.open_resolved_for_read(&resolved).unwrap_err();
     assert!(is_sandbox_err(&e), "{e}");
+    assert_no_leak(&e, outside.path());
+}
+
+/// エラーに root の外の実 path（の一部）を載せない
+fn assert_no_leak(e: &Error, outside: &Path) {
+    let name = outside.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(!e.to_string().contains(&name), "leaks {name}: {e}");
 }
 
 // ---------------------------------------------------------------------------
@@ -476,6 +485,13 @@ fn child_env_keeps_only_passthrough_vars() {
         ("SUBAGENT_ANTHROPIC_API_KEY", "sk-secret2"),
         ("NOTION_TOKEN", "ntn"),
         ("AWS_SECRET_ACCESS_KEY", "aws"),
+        // Windows の tool chain が使う、secret でない変数
+        ("APPDATA", "C:\\Users\\u\\AppData\\Roaming"),
+        ("LOCALAPPDATA", "C:\\Users\\u\\AppData\\Local"),
+        ("ProgramData", "C:\\ProgramData"),
+        ("SystemDrive", "C:"),
+        ("PATHEXT", ".COM;.EXE"),
+        ("ComSpec", "C:\\Windows\\system32\\cmd.exe"),
     ];
     let env = child_env(|k| {
         parent
@@ -484,9 +500,19 @@ fn child_env_keeps_only_passthrough_vars() {
             .map(|(_, v)| v.to_string())
     });
     let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
-    assert!(names.contains(&"PATH"));
-    assert!(names.contains(&"HOME"));
-    assert!(names.contains(&"TEMP"));
+    for keep in [
+        "PATH",
+        "HOME",
+        "TEMP",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "ProgramData",
+        "SystemDrive",
+        "PATHEXT",
+        "ComSpec",
+    ] {
+        assert!(names.contains(&keep), "{keep} missing: {names:?}");
+    }
     for secret in [
         "ANTHROPIC_API_KEY",
         "SUBAGENT_ANTHROPIC_API_KEY",
@@ -506,4 +532,122 @@ fn child_path_drops_relative_entries() {
     let p = &env.iter().find(|(k, _)| k == "PATH").unwrap().1;
     let parts: Vec<PathBuf> = std::env::split_paths(p).collect();
     assert_eq!(parts, vec![PathBuf::from(abs)]);
+}
+
+// ---------------------------------------------------------------------------
+// critic 指摘への対応（PR #77）
+// ---------------------------------------------------------------------------
+
+/// FIFO は開かずに拒否する（以前は open が永久に止まり、lock も握ったままになった）
+#[cfg(unix)]
+#[test]
+fn fifo_is_refused_without_hanging() {
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("pipe");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !made {
+        eprintln!("skip: mkfifo is not available");
+        return;
+    }
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let w = ws(&root);
+        let read = w.read_text("pipe").map(|_| ());
+        let write = w.create("pipe", "x").map(|_| ());
+        let _ = tx.send((read, write));
+    });
+    let (read, write) = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("workspace hung on a FIFO");
+    assert!(matches!(read, Err(Error::Sandbox(_))), "{read:?}");
+    assert!(matches!(write, Err(Error::Sandbox(_))), "{write:?}");
+}
+
+/// 件数の上限はタスクごと（begin_task で数え直す）
+#[test]
+fn file_limit_is_per_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = Workspace::new(vec![dir.path().to_path_buf()]).unwrap();
+    let max = subagent::sandbox::workspace::DEFAULT_MAX_FILES;
+    // 1 タスクで上限を超えると拒否
+    w.begin_task();
+    for i in 0..max {
+        w.create(&format!("one/{i}.txt"), "x").unwrap();
+    }
+    assert!(is_sandbox_err(&w.create("one/over.txt", "x").unwrap_err()));
+    // タスクを分ければ合計で上限を超えても書ける
+    for i in 0..(max + 5) {
+        w.begin_task();
+        w.create(&format!("many/{i}.txt"), "x").unwrap();
+    }
+    // changes() は今のタスクの分だけ
+    assert_eq!(w.changes().len(), 1);
+}
+
+#[test]
+fn resolve_dir_accepts_root_aliases() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = ws(dir.path());
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    for rel in [".", "", "./", "  "] {
+        assert_eq!(w.resolve_dir(Some(rel)).unwrap(), root, "{rel:?}");
+    }
+    assert!(w.resolve_dir(Some("..")).is_err());
+}
+
+/// 読み出しもハードリンク（リンク数 2 以上）を拒否する（書き込みと同じ）
+#[test]
+fn hard_linked_files_are_not_read() {
+    let root = tempfile::tempdir().unwrap();
+    let a = root.path().join("a.txt");
+    std::fs::write(&a, "data").unwrap();
+    if std::fs::hard_link(&a, root.path().join("b.txt")).is_err() {
+        eprintln!("skip: hard links are not supported here");
+        return;
+    }
+    let w = ws(root.path());
+    assert!(is_sandbox_err(&w.read_text("b.txt").unwrap_err()));
+    assert!(is_sandbox_err(&w.read_text("a.txt").unwrap_err()));
+}
+
+/// PATH の entry が workspace の中を指していれば子に渡さない（workspace に置いた偽の program を防ぐ）
+#[test]
+fn child_path_drops_entries_inside_the_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let path = std::env::join_paths([bin.clone(), outside.path().to_path_buf()]).unwrap();
+    let path = path.to_string_lossy().into_owned();
+    let sb = Sandbox::new(
+        ws(dir.path()),
+        CommandPolicy::from_lookup(|k| match k {
+            "PATH" => Some(path.clone()),
+            "SUBAGENT_CODEGEN_ALLOWED_COMMANDS" => Some("cargo".into()),
+            _ => None,
+        }),
+    );
+    let env = sb.effective_env().unwrap();
+    let p = &env.iter().find(|(k, _)| k == "PATH").unwrap().1;
+    let parts: Vec<PathBuf> = std::env::split_paths(p).collect();
+    assert_eq!(parts, vec![outside.path().to_path_buf()]);
+}
+
+/// Windows では `.exe` 以外の拡張子（`.bat` / `.cmd`）は allowlist にも program にも使えない
+#[cfg(windows)]
+#[test]
+fn windows_allowlist_rejects_script_extensions() {
+    let p = CommandPolicy::from_lookup(|k| {
+        (k == "SUBAGENT_CODEGEN_ALLOWED_COMMANDS").then(|| "npm.cmd,build.bat,git.exe,cargo".into())
+    });
+    assert_eq!(p.allowed(), ["git".to_string(), "cargo".to_string()]);
+    assert!(p.check_program("git").is_ok());
+    assert!(p.check_program("GIT.EXE").is_ok());
+    assert!(p.check_program("cargo.cmd").is_err());
+    assert!(p.check_program("npm.cmd").is_err());
+    assert!(p.check_program("build.bat").is_err());
 }

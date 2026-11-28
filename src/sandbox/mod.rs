@@ -74,6 +74,35 @@ impl Sandbox {
         self.workspace.clone().map_err(Error::Sandbox)
     }
 
+    /// タスクの始まり（[`Workspace::begin_task`]）。roots が無ければ何もしない
+    pub fn begin_task(&self) {
+        if let Ok(ws) = &self.workspace {
+            ws.begin_task();
+        }
+    }
+
+    /// 子プロセスに渡す env。PATH から workspace の中を指す entry を除く
+    /// （workspace に置かれた同名の program を拾わないように）
+    pub fn effective_env(&self) -> Result<Vec<(String, String)>> {
+        let ws = self.workspace()?;
+        Ok(self
+            .policy
+            .env()
+            .iter()
+            .filter_map(|(k, v)| {
+                if k != "PATH" {
+                    return Some((k.clone(), v.clone()));
+                }
+                let kept: Vec<_> = std::env::split_paths(v)
+                    .filter(|p| !ws.contains(p))
+                    .collect();
+                let joined = std::env::join_paths(kept).ok()?;
+                let joined = joined.to_string_lossy().into_owned();
+                (!joined.is_empty()).then(|| (k.clone(), joined))
+            })
+            .collect())
+    }
+
     pub fn policy(&self) -> &CommandPolicy {
         &self.policy
     }
@@ -88,7 +117,8 @@ impl Sandbox {
         self.policy.check_program(program)?;
         let ws = self.workspace()?;
         let dir = ws.resolve_dir(cwd)?;
-        run_command(&self.policy, &dir, program, args).await
+        let policy = self.policy.clone().with_env(self.effective_env()?);
+        run_command(&policy, &dir, program, args).await
     }
 
     /// コマンド行（shell の構文なし）を分けて実行する

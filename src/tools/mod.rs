@@ -73,6 +73,9 @@ impl Tool for FileCreateTool {
     fn parameters(&self) -> &JsonMap {
         &self.params
     }
+    fn begin_task(&self) {
+        self.sandbox.begin_task();
+    }
 
     async fn invoke(&self, params: JsonMap) -> Result<Value> {
         let path = required_str(&params, "path")?.to_string();
@@ -145,6 +148,9 @@ impl Tool for BashTool {
     fn parameters(&self) -> &JsonMap {
         &self.params
     }
+    fn begin_task(&self) {
+        self.sandbox.begin_task();
+    }
 
     async fn invoke(&self, params: JsonMap) -> Result<Value> {
         let command = required_str(&params, "command")?;
@@ -191,6 +197,9 @@ impl Tool for LintTool {
     }
     fn parameters(&self) -> &JsonMap {
         &self.params
+    }
+    fn begin_task(&self) {
+        self.sandbox.begin_task();
     }
 
     async fn invoke(&self, params: JsonMap) -> Result<Value> {
@@ -248,6 +257,9 @@ impl Tool for StrReplaceTool {
     fn parameters(&self) -> &JsonMap {
         &self.params
     }
+    fn begin_task(&self) {
+        self.sandbox.begin_task();
+    }
 
     async fn invoke(&self, params: JsonMap) -> Result<Value> {
         let file = required_str(&params, "file")?.to_string();
@@ -291,6 +303,9 @@ impl Tool for ViewTool {
     }
     fn parameters(&self) -> &JsonMap {
         &self.params
+    }
+    fn begin_task(&self) {
+        self.sandbox.begin_task();
     }
 
     async fn invoke(&self, params: JsonMap) -> Result<Value> {

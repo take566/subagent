@@ -6,7 +6,8 @@
 //! - cwd は workspace の中、stdin は null、timeout（`SUBAGENT_COMMAND_TIMEOUT_SECS`、既定 120 秒）で
 //!   kill する。出力は stdout / stderr それぞれ約 3 万文字で切る
 //! - env は空にしてから [`PASSTHROUGH_ENV`] だけを渡す（API 鍵や `NOTION_TOKEN` は子に渡らない）。
-//!   PATH の相対 entry（`.` や空）は落とす
+//!   PATH の相対 entry（`.` や空）は落とす。[`crate::sandbox::Sandbox::run`] は workspace の中を
+//!   指す entry も落とす。Windows では `.exe` 以外の拡張子（`.bat` / `.cmd`）の program は使えない
 //!
 //! **これは sandbox ではない**。allowlist にある program（`cargo` / `npm` など）は build script や
 //! package script を通じて任意のコードを実行できる。そうした program を許すのは、
@@ -34,6 +35,13 @@ pub const PASSTHROUGH_ENV: &[&str] = &[
     "TMP",
     "TMPDIR",
     "SystemRoot",
+    // Windows の tool chain（cargo / rustup / git など）が使う、secret でない変数
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramData",
+    "SystemDrive",
+    "PATHEXT",
+    "ComSpec",
 ];
 
 fn deny(msg: impl Into<String>) -> Error {
@@ -61,13 +69,21 @@ pub struct CommandPolicy {
     output_limit: usize,
 }
 
-/// bare な program 名か（path 区切り・ドライブ・空白・制御文字を含まない）
+/// bare な program 名か（path 区切り・ドライブ・空白・制御文字を含まない）。
+/// Windows では `.exe` 以外の拡張子（`.bat` / `.cmd` など。cmd.exe を通って実行される）も拒否する
 fn is_bare_program(p: &str) -> bool {
-    !p.is_empty()
+    let bare = !p.is_empty()
         && p != "."
         && p != ".."
         && !p.contains(['/', '\\', ':'])
-        && !p.chars().any(|c| c.is_whitespace() || c.is_control())
+        && !p.chars().any(|c| c.is_whitespace() || c.is_control());
+    if cfg!(windows) {
+        bare && p
+            .rsplit_once('.')
+            .is_none_or(|(_, ext)| ext.eq_ignore_ascii_case("exe"))
+    } else {
+        bare
+    }
 }
 
 /// 比較用の名前（Windows は大文字小文字を区別せず、`.exe` を外す）
@@ -165,6 +181,12 @@ impl CommandPolicy {
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// 子プロセスに渡す env を差し替える
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
         self
     }
 

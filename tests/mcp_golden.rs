@@ -490,3 +490,25 @@ fn bash_tool_child_env_has_no_secrets() {
     );
     assert!(err, "{text}");
 }
+
+/// direct tool の呼び出しも 1 回ずつ別タスクとして数える（SUBAGENT_MAX_FILES を超えて作れる）
+#[test]
+fn direct_tool_calls_count_files_per_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::path::absolute(dir.path()).unwrap();
+    let root = root.to_string_lossy().into_owned();
+    let mut c = Client::spawn_with(
+        env!("CARGO_BIN_EXE_codegen-server"),
+        dir.path(),
+        &[("SUBAGENT_ROOTS", &root), ("SUBAGENT_MAX_FILES", "2")],
+        Stdio::null(),
+    );
+    c.initialize();
+    for i in 0..5 {
+        let (err, text) = c.call(
+            "file_create",
+            json!({ "path": format!("f{i}.txt"), "content": "x" }),
+        );
+        assert!(!err, "call {i}: {text}");
+    }
+}

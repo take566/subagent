@@ -8,12 +8,18 @@
 //!   実 path** を確かめる（Windows は `GetFinalPathNameByHandleW`、Linux は `/proc/self/fd`、
 //!   macOS は `fcntl(F_GETPATH)`）。resolve と open の間に symlink / junction へ差し替えられても
 //!   root の外は読み書きしない
-//! - 1 ファイルのサイズと、書き込んだファイルの件数に上限を置く
-//! - 操作は 1 つずつ（内部の lock で直列化する）
+//! - open の前に種類を見て、通常ファイル以外（FIFO・デバイス・ディレクトリ）は開かない。
+//!   最後の component は link を辿らずに開く（Unix は `O_NOFOLLOW | O_NONBLOCK`、Windows は
+//!   `FILE_FLAG_OPEN_REPARSE_POINT`）。無いディレクトリは 1 段ずつ作り、作るたびに root の中か確かめる
+//! - リンク数が 2 以上のファイル（ハードリンク）は読みも書きもしない
+//! - 1 ファイルのサイズと、1 タスクで書き込むファイルの件数に上限を置く
+//! - ファイル操作は 1 つずつ（内部の lock で直列化する）。コマンドの実行とは直列化しない
+//! - エラーには呼び出し側の相対 path だけを載せる（root の外の実 path は載せない）
 //!
-//! 限界: open 後の検証で root の外と分かった場合でも、`create` が空のファイルを作ってしまった
-//! 後のことがある（中身は書かない・既存ファイルは空にしない）。リンク数が 2 以上のファイル
-//! （ハードリンク）には書かない。
+//! 限界（競合時）: 確認と作成の間に親ディレクトリを link に差し替えられると、root の外に
+//! **空の**ディレクトリやファイルができることがある。中身は書かず、既存ファイルを空にもしない
+//! （open 後の handle の検証で止まる）。[`Workspace::changes`] は同じファイルを別名
+//! （8.3 形式・大文字小文字違い）で書くと別々に載せる。
 
 use crate::error::{Error, Result};
 use std::fs::{File, OpenOptions};
@@ -25,7 +31,7 @@ use std::sync::{Mutex, MutexGuard};
 pub const ROOTS_ENV: &str = "SUBAGENT_ROOTS";
 /// 1 ファイルの上限（byte）
 pub const MAX_FILE_BYTES_ENV: &str = "SUBAGENT_MAX_FILE_BYTES";
-/// 書き込むファイルの件数の上限（workspace ごと、つまり process ごと）
+/// 1 タスクで書き込むファイルの件数の上限（[`Workspace::begin_task`] で数え直す）
 pub const MAX_FILES_ENV: &str = "SUBAGENT_MAX_FILES";
 
 pub const DEFAULT_MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -271,6 +277,75 @@ fn link_count(_file: &File) -> std::io::Result<u64> {
     Ok(1)
 }
 
+/// 開くときの option。最後の component の link は辿らない（Unix は `O_NOFOLLOW`、Windows は
+/// `FILE_FLAG_OPEN_REPARSE_POINT` で reparse point 自体を開き、[`is_link_handle`] で拒否する）。
+/// Unix は `O_NONBLOCK` も付ける（検証が済んでから外す）
+fn open_options(write: bool) -> OpenOptions {
+    let mut o = OpenOptions::new();
+    if write {
+        o.write(true).create(true).truncate(false);
+    } else {
+        o.read(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        o.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    o
+}
+
+/// open の失敗。link を辿らなかったための失敗（ELOOP）は sandbox の拒否にする
+fn open_error(shown: &str, e: std::io::Error) -> Error {
+    #[cfg(unix)]
+    if e.raw_os_error() == Some(libc::ELOOP) {
+        return deny(format!("{shown} is a symbolic link"));
+    }
+    Error::io_at(shown, e)
+}
+
+/// handle が link（reparse point）自体を指しているか
+fn is_link_handle(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
+}
+
+/// 検証が済んだ handle から `O_NONBLOCK` を外す
+#[cfg(unix)]
+fn clear_nonblocking(file: &File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let fd = file.as_raw_fd();
+    // SAFETY: fd は file が持つ有効な descriptor
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: 同上
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn clear_nonblocking(_file: &File) -> std::io::Result<()> {
+    Ok(())
+}
+
 impl Workspace {
     /// roots を指定して作る（各 root は存在する絶対 path のディレクトリ）
     pub fn new(roots: Vec<PathBuf>) -> Result<Self> {
@@ -339,6 +414,14 @@ impl Workspace {
         &self.roots[0].canonical
     }
 
+    /// タスクの始まり。書き込み件数の数え直しと、[`Self::changes`] の記録を空にする。
+    ///
+    /// エージェントのタスク（`run_task`）と MCP の direct tool の呼び出しごとに呼ばれる。
+    /// 並行して動くタスクがあれば、互いの数えをリセットしうる（上限は目安）
+    pub fn begin_task(&self) {
+        self.lock().clear();
+    }
+
     pub fn limits(&self) -> &WorkspaceLimits {
         &self.limits
     }
@@ -347,30 +430,44 @@ impl Workspace {
         self.changes.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 作った / 変えたファイル（最初に書いた順）
+    /// 今のタスク（最後の [`Self::begin_task`] 以降）で作った / 変えたファイル（最初に書いた順）。
+    /// 同じファイルを別名（8.3 形式・大文字小文字違い・root 内の link 経由）で書くと別々に載る
     pub fn changes(&self) -> Vec<FileChange> {
         self.lock().clone()
+    }
+
+    /// root の中の path か（canonicalize できればその結果で、できなければ字面で判定）
+    pub fn contains(&self, p: &Path) -> bool {
+        let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        self.roots
+            .iter()
+            .any(|r| real.starts_with(&r.canonical) || p.starts_with(&r.display))
     }
 
     fn ensure_inside(&self, real: &Path, rel: &str) -> Result<()> {
         if self.roots.iter().any(|r| real.starts_with(&r.canonical)) {
             Ok(())
         } else {
+            // root の外の実 path はメッセージに載せない
             Err(deny(format!(
                 "{rel:?} resolves outside the workspace roots"
             )))
         }
     }
 
-    /// open 済みの handle の実 path を確かめる（root の外なら拒否）
-    pub fn verify_open_file(&self, file: &File) -> Result<PathBuf> {
+    fn verify_handle(&self, file: &File, shown: &str) -> Result<PathBuf> {
         let real = real_path(file).map_err(|e| {
             deny(format!(
-                "cannot verify the real path of an opened file: {e}"
+                "cannot verify the real path of {shown:?} after opening it: {e}"
             ))
         })?;
-        self.ensure_inside(&real, &real.to_string_lossy())?;
+        self.ensure_inside(&real, shown)?;
         Ok(real)
+    }
+
+    /// open 済みの handle の実 path を確かめる（root の外なら拒否。エラーに実 path は載せない）
+    pub fn verify_open_file(&self, file: &File) -> Result<PathBuf> {
+        self.verify_handle(file, "the opened file")
     }
 
     /// 表示用の path（設定どおりの root + 相対 path）
@@ -388,7 +485,8 @@ impl Workspace {
         self.resolve_parts(&parts, rel)
     }
 
-    fn resolve_parts(&self, parts: &[String], rel: &str) -> Result<PathBuf> {
+    /// 最寄りの既存祖先の実 path と、そこから先（まだ無い component）の開始位置
+    fn resolve_split(&self, parts: &[String], rel: &str) -> Result<(PathBuf, usize)> {
         let base = self.canonical_root();
         for i in (0..=parts.len()).rev() {
             let candidate = parts[..i].iter().fold(base.to_path_buf(), |p, c| p.join(c));
@@ -399,15 +497,25 @@ impl Workspace {
             let real = std::fs::canonicalize(&candidate)
                 .map_err(|e| deny(format!("cannot resolve {rel:?}: {e}")))?;
             self.ensure_inside(&real, rel)?;
-            return Ok(parts[i..].iter().fold(real, |p, c| p.join(c)));
+            return Ok((real, i));
         }
         unreachable!("i == 0 always returns")
     }
 
-    /// コマンドの cwd（None は最初の root）。存在する root 内のディレクトリでなければ拒否
+    fn resolve_parts(&self, parts: &[String], rel: &str) -> Result<PathBuf> {
+        let (real, i) = self.resolve_split(parts, rel)?;
+        Ok(parts[i..].iter().fold(real, |p, c| p.join(c)))
+    }
+
+    /// コマンドの cwd（None・`""`・`.` は最初の root）。存在する root 内のディレクトリでなければ拒否
     pub fn resolve_dir(&self, rel: Option<&str>) -> Result<PathBuf> {
-        let Some(rel) = rel else {
-            return Ok(self.canonical_root().to_path_buf());
+        let is_root = |r: &str| {
+            r.split(['/', '\\'])
+                .all(|p| p.trim().is_empty() || p == ".")
+        };
+        let rel = match rel {
+            Some(r) if !is_root(r) => r,
+            _ => return Ok(self.canonical_root().to_path_buf()),
         };
         let p = self.resolve(rel)?;
         if !p.is_dir() {
@@ -416,17 +524,41 @@ impl Workspace {
         Ok(p)
     }
 
-    /// resolve 済みの path を読み出し用に開き、実 path・種類・サイズを確かめる
-    pub fn open_resolved_for_read(&self, path: &Path) -> Result<File> {
-        let file = File::open(path).map_err(|e| Error::io_at(path, e))?;
-        self.verify_open_file(&file)?;
-        let meta = file.metadata().map_err(|e| Error::io_at(path, e))?;
-        if !meta.is_file() {
-            return Err(deny(format!("not a regular file: {}", path.display())));
+    /// open の前に種類を見る（FIFO やデバイスを open すると止まりうるので、通常ファイル以外は拒否）
+    fn precheck(&self, path: &Path, shown: &str, must_exist: bool) -> Result<bool> {
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_file() => Ok(true),
+            Ok(_) => Err(deny(format!("not a regular file: {shown}"))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !must_exist => Ok(false),
+            Err(e) => Err(Error::io_at(shown, e)),
         }
+    }
+
+    /// open した handle を確かめる: 実 path が root の中、通常ファイル、link でない、リンク数 1
+    fn check_opened(&self, file: &File, shown: &str) -> Result<std::fs::Metadata> {
+        self.verify_handle(file, shown)?;
+        let meta = file.metadata().map_err(|e| Error::io_at(shown, e))?;
+        if !meta.is_file() || is_link_handle(&meta) {
+            return Err(deny(format!("not a regular file: {shown}")));
+        }
+        if link_count(file).map_err(|e| Error::io_at(shown, e))? > 1 {
+            return Err(deny(format!(
+                "{shown} has more than one hard link; refusing to use it"
+            )));
+        }
+        clear_nonblocking(file).map_err(|e| Error::io_at(shown, e))?;
+        Ok(meta)
+    }
+
+    fn open_read(&self, path: &Path, shown: &str) -> Result<File> {
+        self.precheck(path, shown, true)?;
+        let file = open_options(false)
+            .open(path)
+            .map_err(|e| open_error(shown, e))?;
+        let meta = self.check_opened(&file, shown)?;
         if meta.len() > self.limits.max_file_bytes {
             return Err(deny(format!(
-                "file is larger than the limit ({} > {} bytes)",
+                "{shown} is larger than the limit ({} > {} bytes)",
                 meta.len(),
                 self.limits.max_file_bytes
             )));
@@ -434,15 +566,21 @@ impl Workspace {
         Ok(file)
     }
 
+    /// resolve 済みの path を読み出し用に開き、実 path・種類・サイズを確かめる
+    pub fn open_resolved_for_read(&self, path: &Path) -> Result<File> {
+        let shown = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.open_read(path, &shown)
+    }
+
     fn read_locked(&self, rel: &str) -> Result<String> {
         let parts = validate_relative(rel)?;
         let path = self.resolve_parts(&parts, rel)?;
-        let shown = parts.join("/");
         // エラーには canonical な path ではなく、渡された相対 path を載せる
-        let file = match self.open_resolved_for_read(&path) {
-            Err(Error::IoPath { source, .. }) => return Err(Error::io_at(&shown, source)),
-            other => other?,
-        };
+        let shown = parts.join("/");
+        let file = self.open_read(&path, &shown)?;
         let mut bytes = vec![];
         file.take(self.limits.max_file_bytes + 1)
             .read_to_end(&mut bytes)
@@ -474,35 +612,34 @@ impl Workspace {
         let tracked = changes.iter().any(|c| c.path == shown);
         if !tracked && changes.len() >= self.limits.max_files {
             return Err(deny(format!(
-                "too many files written in this workspace (limit {})",
+                "too many files written in this task (limit {})",
                 self.limits.max_files
             )));
         }
-        let path = self.resolve_parts(&parts, rel)?;
-        let existed = std::fs::symlink_metadata(&path).is_ok();
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| Error::io_at(&shown, e))?;
-            // 作っている間に差し替えられていないか
-            let real = std::fs::canonicalize(dir).map_err(|e| Error::io_at(&shown, e))?;
-            self.ensure_inside(&real, rel)?;
-        }
-        // truncate は検証の後（root の外の既存ファイルを空にしない）
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
+        let (mut dir, i) = self.resolve_split(&parts, rel)?;
+        let path = if i == parts.len() {
+            dir
+        } else {
+            // 無いディレクトリは 1 段ずつ作り、作るたびに root の中か確かめてから下りる
+            for c in &parts[i..parts.len() - 1] {
+                let next = dir.join(c);
+                match std::fs::create_dir(&next) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(Error::io_at(&shown, e)),
+                }
+                dir = std::fs::canonicalize(&next).map_err(|e| Error::io_at(&shown, e))?;
+                self.ensure_inside(&dir, rel)?;
+            }
+            dir.join(&parts[parts.len() - 1])
+        };
+        let existed = self.precheck(&path, &shown, false)?;
+        // 最後の component は link を辿らずに開く。truncate は検証の後
+        // （root の外の既存ファイルを空にしない）
+        let mut file = open_options(true)
             .open(&path)
-            .map_err(|e| Error::io_at(&shown, e))?;
-        self.verify_open_file(&file)?;
-        let meta = file.metadata().map_err(|e| Error::io_at(&shown, e))?;
-        if !meta.is_file() {
-            return Err(deny(format!("not a regular file: {shown}")));
-        }
-        if link_count(&file).map_err(|e| Error::io_at(&shown, e))? > 1 {
-            return Err(deny(format!(
-                "{shown} has more than one hard link; refusing to write"
-            )));
-        }
+            .map_err(|e| open_error(&shown, e))?;
+        self.check_opened(&file, &shown)?;
         file.set_len(0).map_err(|e| Error::io_at(&shown, e))?;
         file.write_all(content.as_bytes())
             .map_err(|e| Error::io_at(&shown, e))?;

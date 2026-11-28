@@ -261,9 +261,17 @@ impl AgentBase {
         self.tools.get(name)
     }
 
-    /// ツールを呼び出し（MCP 統合用）
+    /// ツールを呼び出し（MCP 統合用）。1 回の呼び出しを 1 タスクとして扱う（[`Self::begin_task`]）
     pub async fn invoke_tool(&self, name: &str, params: JsonMap) -> Result<Value> {
+        self.begin_task();
         self.call_tool(name, params).await
+    }
+
+    /// 全ツールにタスクの始まりを知らせる（sandbox の書き込み件数の上限はタスクごと）
+    pub fn begin_task(&self) {
+        for tool in self.tools.get_all() {
+            tool.begin_task();
+        }
     }
 
     /// 全エージェント共通のタスク実行ライフサイクル。
@@ -285,6 +293,7 @@ impl AgentBase {
         let start = Instant::now();
         self.update_status(AgentStatus::Running);
         self.set_current_task(Some(task.clone()));
+        self.begin_task();
 
         // future が途中で drop された（キャンセルされた）場合に状態を戻す
         let mut guard = CancelGuard {

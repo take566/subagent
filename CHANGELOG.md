@@ -21,6 +21,19 @@
 - `CodeGenAgent::new()` / `DocumentAgent::new()` / `create_default_orchestrator()` は `SUBAGENT_ROOTS` を workspace にする（未設定ならファイルを作るタスクは失敗する）。`with_options(.., Some(dir))` は `dir` を root にする（無ければ作る）
 - テスト: golden の MCP サーバーは作業ディレクトリを `SUBAGENT_ROOTS` にして起動する（golden の記録は変えていない）
 
+### sandbox の追加修正（PR #77 の review）
+- 通常ファイル以外（FIFO など）は開かずに拒否する。以前は Linux で FIFO を open すると lock を握ったまま止まった。最後の component は link を辿らずに開く（Unix `O_NOFOLLOW | O_NONBLOCK`、Windows `FILE_FLAG_OPEN_REPARSE_POINT`）
+- `SUBAGENT_MAX_FILES` はタスクごとの上限になった（`Workspace::begin_task`。エージェントの `run_task` と MCP の direct tool の呼び出しごとに数え直す）。以前は process 全体で数えたので、長く動く MCP server は 200 件で書けなくなった。`changes()` も今のタスクの分だけを返す。`Tool` trait に既定で何もしない `begin_task` を追加した
+- 無いディレクトリは 1 段ずつ作り、作るたびに root の中か確かめる（`create_dir_all` をやめた）
+- エラーメッセージに root の外の実パスを載せない（渡された相対パスだけ）
+- `resolve_dir`（コマンドの `cwd`）は `.` と空文字を root として受け付ける
+- Review: `// TODO` のような `/` で始まる 1 行のコードを、パスとして拒否しなくなった（パスらしい値だけを拒否する）
+- Windows: allowlist と program の名前に `.exe` 以外の拡張子（`.bat` / `.cmd`）を使えない
+- 子に渡す `PATH` から workspace の中を指す entry を除く。Windows 向けに `APPDATA` / `LOCALAPPDATA` / `ProgramData` / `SystemDrive` / `PATHEXT` / `ComSpec` も渡す
+- 読み出しもリンク数 2 以上のファイルを拒否する（書き込みと同じ）
+- CI に `macos-latest` を追加した（macOS の `F_GETPATH` の実装をコンパイルする）
+- 既知の限界（README に記載）: 競合時に root の外に空のファイル / ディレクトリができうる（中身は書かない）、`changes()` は別名（8.3・大文字小文字）を別々に載せる、コマンドはファイル操作と直列化しない、timeout で kill するのは直接の子だけ
+
 ## [1.1.0] - 2026-11-28
 
 ### 変更

@@ -126,10 +126,29 @@ impl ReviewAgent {
         }
     }
 
-    /// `source_code` が（コードではなく）絶対パスに見えるか。
-    /// 1 行で、`/` 始まりか絶対パス（Windows の `C:\...` も）。こうした値は読まずに拒否する
+    /// `source_code` が（コードではなく）絶対パスに見えるか。こうした値は読まずに拒否する。
+    ///
+    /// 1 行で `/` 始まりか絶対パス（Windows の `C:\...` も）で、さらにパスらしいもの
+    /// （コメント `//` `/*` で始まらない、コードの記号 `(){};=<>"'` などを含まない、`/` 始まりなら
+    /// 空白を含まない、2 段以上か拡張子付き）だけ。`// TODO` のような 1 行のコードはコードとして扱う
     fn is_file_path(s: &str) -> bool {
-        !s.contains('\n') && (s.starts_with('/') || Path::new(s).is_absolute())
+        if s.contains('\n') || s.starts_with("//") || s.starts_with("/*") {
+            return false;
+        }
+        if !(s.starts_with('/') || Path::new(s).is_absolute()) {
+            return false;
+        }
+        if s.chars().any(|c| "(){};=<>\"'`|&$,!".contains(c)) {
+            return false;
+        }
+        if s.starts_with('/') && s.chars().any(char::is_whitespace) {
+            return false;
+        }
+        let segs: Vec<&str> = s.split(['/', '\\']).filter(|x| !x.is_empty()).collect();
+        segs.len() >= 2
+            || segs
+                .last()
+                .is_some_and(|l| l.contains('.') && !l.starts_with('.') && !l.ends_with('.'))
     }
 
     /// コードを分析
@@ -295,5 +314,24 @@ mod tests {
         assert!(!ReviewAgent::is_file_path("// c\nfn main() {}"));
         #[cfg(windows)]
         assert!(ReviewAgent::is_file_path(r"C:\src\a.rs"));
+        #[cfg(windows)]
+        assert!(ReviewAgent::is_file_path(r"C:\Users\John Smith\a.rs"));
+        // パスらしい 1 行
+        for p in ["/etc/passwd", "/src/a.ts", "/a.rs", "/home/u/x/y"] {
+            assert!(ReviewAgent::is_file_path(p), "{p}");
+        }
+        // `/` で始まる 1 行のコード
+        for code in [
+            "// TODO",
+            "//",
+            "/* doc */ fn a() {}",
+            "/*x*/",
+            "/x",
+            "/ 2",
+            "/regex/.test(s)",
+            "/a/b; rm -rf x",
+        ] {
+            assert!(!ReviewAgent::is_file_path(code), "{code}");
+        }
     }
 }

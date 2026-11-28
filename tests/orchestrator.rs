@@ -676,3 +676,45 @@ async fn hierarchical_execute_reports_parent_task_id() {
         .collect();
     assert_eq!(kids, vec!["k1", "k2"]);
 }
+
+/// 書き込み件数の上限はタスクごと（長く動く MCP server が上限で止まらない）
+#[tokio::test]
+async fn file_limit_is_counted_per_task() {
+    use subagent::sandbox::{CommandPolicy, Sandbox, Workspace, WorkspaceLimits};
+    let sandbox_with = |dir: &std::path::Path, max_files: usize| {
+        Arc::new(Sandbox::new(
+            Workspace::with_limits(
+                vec![dir.to_path_buf()],
+                WorkspaceLimits {
+                    max_files,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+            CommandPolicy::disabled(),
+        ))
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // 1 タスクで 2 ファイル（本体とテスト）を書く。上限 2 なら、別の名前で何回やっても通る
+    let cg =
+        CodeGenAgent::with_sandbox(CodeGenAgent::default_config(), sandbox_with(dir.path(), 2));
+    for lang in ["typescript", "javascript", "typescript"] {
+        cg.execute(Task::new(
+            "c",
+            "codegen",
+            json!({ "specification": "s", "language": lang }),
+        ))
+        .await
+        .unwrap();
+    }
+    assert!(dir.path().join("generated.js.test.js").exists());
+    // 上限 1 なら 1 タスクの中で超えるので失敗
+    let dir = tempfile::tempdir().unwrap();
+    let cg =
+        CodeGenAgent::with_sandbox(CodeGenAgent::default_config(), sandbox_with(dir.path(), 1));
+    let e = cg
+        .execute(Task::new("c", "codegen", json!({ "specification": "s" })))
+        .await
+        .unwrap_err();
+    assert_eq!(e.name(), "SandboxError", "{e}");
+}
