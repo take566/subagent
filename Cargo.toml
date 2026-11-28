@@ -46,3 +46,4 @@ uuid = { version = "1.29.3", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+wiremock = "0.6.5"
