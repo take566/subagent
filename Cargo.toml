@@ -26,6 +26,10 @@ path = "src/bin/review-server.rs"
 name = "document-server"
 path = "src/bin/document-server.rs"
 
+[features]
+# 記録済みの応答を返す ReplayLlm（テスト・golden 用。本番 binary では有効にしない）
+replay = []
+
 [dependencies]
 async-trait = "0.1.92"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
