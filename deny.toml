@@ -1,0 +1,48 @@
+# cargo-deny の設定（CI の deny ジョブと、手元の `cargo deny check` で使う）
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# CI で動かす OS 向けの依存だけを検査する
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+[advisories]
+# RustSec の勧告（脆弱性・メンテ終了・取り下げ）に載っている依存はエラー
+version = 2
+yanked = "deny"
+ignore = [
+    # chrono のメンテナンス終了（脆弱性ではない）。安全な更新先がなく、
+    # rmcp / schemars からも推移的に使われているため、こちらで外しても解消しない。
+    # rmcp が chrono 依存をやめたら、直接依存を jiff か time に移してこの行を消す。
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; also a transitive dependency of rmcp and schemars" },
+]
+
+[licenses]
+version = 2
+# 許容的なライセンスだけを許可する（コピーレフトは含めない）
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# 同じクレートの複数バージョンは警告のみ（依存の都合で避けられないことがある）
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# crates.io 以外（git 依存など）は許可しない
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
