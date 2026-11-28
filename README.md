@@ -125,7 +125,22 @@ cargo build --release
 
 ### Review エージェントの lint
 
-`source_code`（文字列）は必須で、`/` で始まるか絶対パスならファイルとして読み込みます。`lint_command` パラメータを指定したときだけ lint を実行します（例: `{"source_code": "...", "lint_command": "cargo clippy"}`）。出力のうち `error` / `warning` を含む行が指摘になります。
+`source_code`（文字列）は必須で、`/` で始まるか絶対パスならファイルとして読み込みます。`lint_command` パラメータを指定したときだけ lint を実行します（例: `{"source_code": "...", "lint_command": "cargo clippy"}`）。出力は形式から言語を推定して解釈します。ESLint（stylish）・tsc・flake8 / ruff の行は `file` / `line` / `column` / `rule` / `tool` / `language` 付きの指摘になり、どれにも当たらない場合は `error` / `warning` を含む行が指摘になります（`tool: "generic"`）。stdout と stderr の両方を解釈します。ruff は既定の出力形式では行に当たらないので `ruff check --output-format concise` を指定してください。
+
+### Document Agent の Notion 連携
+
+Document Agent は次のツールを提供します。
+
+- `notion_page_create`: 親ページ配下に新規作成 (`parent_page_id`, `title`, `content`)
+- `notion_page_update`: 既存ページのタイトル変更・本文追記 (`page_id`, `title`, `content`)
+
+利用には環境変数 `NOTION_TOKEN` に Notion integration のトークンを設定します。未設定の場合ツールはエラーを返します。対象ページは integration に共有してください。
+
+```bash
+NOTION_TOKEN=... ./target/release/document-server
+```
+
+HTTPS は rustls で、証明書の検証には OS の証明書ストア（rustls-platform-verifier）を使います。コンテナなどで動かす場合は CA 証明書（Debian / Ubuntu なら `ca-certificates`）を入れておいてください。タイムアウトは接続 10 秒・リクエスト全体 60 秒です。本文の追記がページ作成後に失敗した場合、エラーに作成済みの page_id を含めます（再実行で重複ページを作らないように `notion_page_update` で続きを追記してください）。
 
 ## ログ
 
@@ -141,7 +156,7 @@ src/
 ├── core/            # Subagent トレイト・共通状態・ツールレジストリ
 ├── orchestrator/    # Orchestrator・Task Parser・Planner・Result Aggregator
 ├── protocol.rs      # A2A プロトコル
-├── tools.rs         # 組み込みツール
+├── tools/           # 組み込みツール（lint_parsers: lint 出力パーサ、notion: Notion API）
 ├── mcp.rs           # MCP サーバー
 ├── types.rs         # 型定義
 ├── error.rs         # エラー型

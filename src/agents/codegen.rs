@@ -79,17 +79,26 @@ impl CodeGenAgent {
 
     /// `base_dir` を指定すると、相対パスはそこを基準に解決する
     pub fn with_options(config: SubagentConfig, base_dir: Option<PathBuf>) -> Self {
+        Self::with_tools(config, Self::default_tools(base_dir))
+    }
+
+    /// 既定のツール（file_create / bash_tool / str_replace）。相対パスは `base_dir` 基準
+    pub fn default_tools(base_dir: Option<PathBuf>) -> Vec<Arc<dyn Tool>> {
+        vec![
+            Arc::new(FileCreateTool::new(base_dir.clone())),
+            Arc::new(BashTool::default()),
+            Arc::new(StrReplaceTool::new(base_dir)),
+        ]
+    }
+
+    /// ツールを差し替えて作る（テストでモックツールを渡す用）
+    pub fn with_tools(config: SubagentConfig, tools: Vec<Arc<dyn Tool>>) -> Self {
         let policy = config
             .behavior
             .retry_policy
             .clone()
             .or_else(|| Self::default_config().behavior.retry_policy)
             .expect("default retry policy");
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(FileCreateTool::new(base_dir.clone())),
-            Arc::new(BashTool::default()),
-            Arc::new(StrReplaceTool::new(base_dir)),
-        ];
         let base = AgentBase::new(config, tools);
         let retry_manager = RetryManager::new(policy, base.logger.clone());
         let error_handler = ErrorHandler::new(

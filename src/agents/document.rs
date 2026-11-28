@@ -3,7 +3,7 @@
 use crate::core::subagent::{AgentBase, Subagent};
 use crate::core::tool::Tool;
 use crate::error::{Error, Result};
-use crate::tools::FileCreateTool;
+use crate::tools::{FileCreateTool, NotionClient, NotionPageCreateTool, NotionPageUpdateTool};
 use crate::types::{
     Backoff, BehaviorConfig, ErrorAction, ErrorHandlingStrategy, InterfaceConfig, JsonMap,
     ParameterDefinition, RetryPolicy, RoleConfig, SubagentConfig, Task, TaskResult, now_iso,
@@ -46,7 +46,11 @@ impl DocumentAgent {
                     ..ParameterDefinition::new("result", "object", true)
                 }],
             },
-            tools: vec!["file_create".into()],
+            tools: vec![
+                "file_create".into(),
+                "notion_page_create".into(),
+                "notion_page_update".into(),
+            ],
             behavior: BehaviorConfig {
                 retry_policy: Some(RetryPolicy {
                     max_attempts: 2,
@@ -66,13 +70,28 @@ impl DocumentAgent {
 
     /// `base_dir` を指定すると `<base_dir>/docs/` に出力する
     pub fn with_options(config: SubagentConfig, base_dir: Option<PathBuf>) -> Self {
+        Self::with_tools(config, Self::default_tools(base_dir))
+    }
+
+    /// 既定のツール（file_create / notion_page_create / notion_page_update）。
+    /// Notion ツールは実 API と環境変数 `NOTION_TOKEN`（呼び出し時に読む）を使う。
+    pub fn default_tools(base_dir: Option<PathBuf>) -> Vec<Arc<dyn Tool>> {
+        let notion = NotionClient::from_env();
+        vec![
+            Arc::new(FileCreateTool::new(base_dir)),
+            Arc::new(NotionPageCreateTool::new(notion.clone())),
+            Arc::new(NotionPageUpdateTool::new(notion)),
+        ]
+    }
+
+    /// ツールを差し替えて作る（テストでモックツールを渡す用）
+    pub fn with_tools(config: SubagentConfig, tools: Vec<Arc<dyn Tool>>) -> Self {
         let policy = config
             .behavior
             .retry_policy
             .clone()
             .or_else(|| Self::default_config().behavior.retry_policy)
             .expect("default retry policy");
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FileCreateTool::new(base_dir))];
         let base = AgentBase::new(config, tools);
         let retry_manager = RetryManager::new(policy, base.logger.clone());
         let error_handler = ErrorHandler::new(
