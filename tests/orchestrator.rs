@@ -160,6 +160,8 @@ async fn hierarchical_parent_first() {
         .unwrap();
     assert_eq!(r.results[0].task_id, "root");
     assert!(r.aggregated["parent"]["summary"].is_string());
+    // TS #36: hierarchical の集約は親の task_id も返す（dependencies が無くても先頭を親として返る）
+    assert_eq!(r.aggregated["parent_task_id"], "root");
     assert_eq!(r.aggregated["children"].as_array().unwrap().len(), 2);
 }
 
@@ -199,7 +201,11 @@ async fn unknown_action_and_empty_sequential_are_errors() {
         .execute(Task::new("u", "nope", json!({})), None)
         .await
         .unwrap_err();
-    assert_eq!(e.to_string(), "No suitable subagent found for action: nope");
+    // TS #37 以降: 未知の action は capability 名そのものとして探し、無ければ capability 名入りのエラー
+    assert_eq!(
+        e.to_string(),
+        r#"No subagent registered with capability "nope" for action: nope"#
+    );
     assert!(
         o.execute(Vec::<Task>::new(), Some(ExecutionPattern::Sequential))
             .await
@@ -314,20 +320,26 @@ mod probe {
     };
 
     pub struct Probe {
+        id: String,
         base: AgentBase,
         handler: ErrorHandler,
         hang: bool,
     }
 
     impl Probe {
+        /// capability は id と同名を 1 つ持つ（TS #37 以降、未知の action は capability 名として探す）
         pub fn new(id: &str, hang: bool) -> Self {
+            Self::with_capabilities(id, &[id], hang)
+        }
+
+        pub fn with_capabilities(id: &str, capabilities: &[&str], hang: bool) -> Self {
             let config = SubagentConfig {
                 id: id.into(),
                 name: id.into(),
                 version: "0".into(),
                 role: RoleConfig {
                     description: String::new(),
-                    capabilities: vec![],
+                    capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
                     constraints: None,
                 },
                 interface: InterfaceConfig {
@@ -338,6 +350,7 @@ mod probe {
                 behavior: BehaviorConfig::default(),
             };
             Probe {
+                id: id.into(),
                 base: AgentBase::new(config, vec![]),
                 handler: ErrorHandler::new(Default::default(), Logger::new("probe")),
                 hang,
@@ -353,13 +366,18 @@ mod probe {
 
         async fn execute(&self, task: Task) -> Result<TaskResult> {
             let hang = self.hang;
+            let agent = self.id.clone();
             self.base
                 .run_task(&task, &self.handler, "PROBE_ERROR", || async {
                     if hang {
                         std::future::pending::<()>().await;
                     }
                     let ctx = serde_json::to_value(&task.context).unwrap_or(Value::Null);
-                    Ok((json!({ "seen_context": ctx, "id": task.id }), 1.0, 0))
+                    Ok((
+                        json!({ "seen_context": ctx, "id": task.id, "agent": agent }),
+                        1.0,
+                        0,
+                    ))
                 })
                 .await
         }
@@ -463,4 +481,131 @@ async fn codegen_and_document_param_types_like_ts() {
         .await
         .is_err()
     );
+}
+
+// ---------------------------------------------------------------------------
+// TS src/orchestrator/orchestrator.test.ts（#37: capability ベースの選択）の移植
+// ---------------------------------------------------------------------------
+
+fn agent_of(r: &subagent::AggregatedResult) -> String {
+    r.results[0].result.as_ref().unwrap()["agent"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn select_subagent_by_capability_mapped_from_action() {
+    let mut o = Orchestrator::new();
+    o.register_subagent(Arc::new(probe::Probe::with_capabilities(
+        "a",
+        &["code_generation"],
+        false,
+    )));
+    o.register_subagent(Arc::new(probe::Probe::with_capabilities(
+        "b",
+        &["web_search"],
+        false,
+    )));
+    let r = o
+        .execute(Task::new("t", "research", json!({})), None)
+        .await
+        .unwrap();
+    assert_eq!(agent_of(&r), "b");
+}
+
+#[tokio::test]
+async fn select_subagent_errors_with_capability_name() {
+    let mut o = Orchestrator::new();
+    o.register_subagent(Arc::new(probe::Probe::with_capabilities(
+        "a",
+        &["code_generation"],
+        false,
+    )));
+    let e = o
+        .execute(Task::new("t", "review", json!({})), None)
+        .await
+        .unwrap_err();
+    assert!(
+        e.to_string()
+            .contains(r#"No subagent registered with capability "code_analysis""#),
+        "{e}"
+    );
+}
+
+#[tokio::test]
+async fn select_subagent_prefers_first_registered_and_keeps_slot_on_reregister() {
+    // TS は Map の挿入順で最初に見つかったものを返す。同じ id を登録し直しても位置は変わらない。
+    let mut o = Orchestrator::new();
+    for id in ["z", "y", "x"] {
+        o.register_subagent(Arc::new(probe::Probe::with_capabilities(
+            id,
+            &["web_search"],
+            false,
+        )));
+    }
+    for _ in 0..5 {
+        let r = o
+            .execute(Task::new("t", "research", json!({})), None)
+            .await
+            .unwrap();
+        assert_eq!(agent_of(&r), "z");
+    }
+    // z を capability 無しで登録し直す → 位置はそのままで中身が置き換わり、y が選ばれる
+    o.register_subagent(Arc::new(probe::Probe::with_capabilities("z", &[], false)));
+    let r = o
+        .execute(Task::new("t", "research", json!({})), None)
+        .await
+        .unwrap();
+    assert_eq!(agent_of(&r), "y");
+    assert!(o.get_subagent("z").is_some());
+}
+
+#[tokio::test]
+async fn select_subagent_ignores_agent_id() {
+    // 旧実装は action → 固定 id（research-001 等）で引いていた。id ではなく capability で選ぶ。
+    let mut o = Orchestrator::new();
+    o.register_subagent(Arc::new(probe::Probe::with_capabilities(
+        "research-001",
+        &["code_generation"],
+        false,
+    )));
+    o.register_subagent(Arc::new(probe::Probe::with_capabilities(
+        "other",
+        &["web_search"],
+        false,
+    )));
+    let r = o
+        .execute(Task::new("t", "research", json!({})), None)
+        .await
+        .unwrap();
+    assert_eq!(agent_of(&r), "other");
+}
+
+#[tokio::test]
+/// planner は依存の深さ 1（子 → 親）しか作らず、execute_hierarchical は親を先頭に積むので、
+/// execute() 経由ではネストは起きない（TS も同じ）。ここでは parent_task_id と子の並びだけを見る。
+async fn hierarchical_execute_reports_parent_task_id() {
+    let mut o = Orchestrator::new();
+    o.register_subagent(Arc::new(probe::Probe::new("echo", false)));
+    let r = o
+        .execute(
+            vec![
+                Task::new("root", "echo", json!({})),
+                with_parent(Task::new("k1", "echo", json!({})), "root"),
+                with_parent(Task::new("k2", "echo", json!({})), "root"),
+            ],
+            Some(ExecutionPattern::Hierarchical),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.aggregated["parent_task_id"], "root");
+    assert_eq!(r.aggregated["parent"]["id"], "root");
+    let kids: Vec<_> = r.aggregated["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["task_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(kids, vec!["k1", "k2"]);
 }
