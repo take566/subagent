@@ -40,6 +40,7 @@
 - MCP サーバーは `AGENT_ID`（agent id の上書き）と `MAX_CONCURRENT`（tools/call の同時実行数の上限）を読む
 - MCP の `execute` は引数を agent に渡す前に検証する（TS #54）。`action` が空でない文字列でない、`task_id` が空でない文字列でない（数値も不可）、`parameters` が object でない場合は `Error: Invalid arguments: ...` の isError を返す
 - `Logger::child` / `LogFields` を追加し、Subagent のツール呼び出し・進捗のログに `task_id` / `correlation_id` / `status` / `duration` を載せる
+- Orchestrator のタスク実行ログを TS #44 に揃えた。`Executing task: <id>`（`status: "started"`）、`Task finished: <id>`（結果の `status` と `duration`）、`Task failed: <id>`（ERROR、`status: "failed"`、`duration`、`data.error`）に、そのタスクの `task_id` / `correlation_id` を載せる（correlation_id の無いタスクには載らない）
 - `RetryManager` は `max_attempts = 0` のとき関数を呼ばずに `Retry failed` を返す（以前は 1 回呼んでいた。TS と同じ）
 
 ### 既知の制限

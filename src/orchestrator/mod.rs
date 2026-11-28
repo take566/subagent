@@ -15,11 +15,12 @@ use crate::types::{
     A2AMessage, ExecutionPattern, MessageType, OrchestrationPlan, Task, TaskMetadata, TaskResult,
     TaskResultPayload, TaskStatus,
 };
-use crate::utils::logger::Logger;
+use crate::utils::logger::{LogContext, LogFields, Logger};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Instant;
 use tokio::sync::broadcast;
 
 static LENGTH_COND_RE: LazyLock<Regex> =
@@ -219,12 +220,23 @@ impl Orchestrator {
     }
 
     /// 単一タスクを実行
+    ///
+    /// TS #44 と同じく task_id / correlation_id を固定した子ロガーで
+    /// started / finished / failed を出す（#61）。`self.logger` は文脈を持たないので、
+    /// `child` が `None` を親から引き継いでも、correlation_id の無いタスクに
+    /// 別タスクの値が載ることはない（TS の `undefined` で上書きするのと同じ結果）。
     async fn execute_task(&self, task: Task) -> Result<TaskResult> {
-        self.logger.info(
-            &format!("Executing task: {}", task.id),
-            Some(&json!({ "action": task.action })),
-        );
         let id = task.id.clone();
+        let log = self.logger.child(LogContext::task(
+            id.clone(),
+            task.correlation_id().map(str::to_string),
+        ));
+        let started_at = Instant::now();
+        log.info_with(
+            &format!("Executing task: {id}"),
+            Some(&json!({ "action": task.action })),
+            &LogFields::status("started"),
+        );
         self.active_tasks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -237,6 +249,19 @@ impl Orchestrator {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&id);
+        let duration = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match &result {
+            Ok(r) => log.info_with(
+                &format!("Task finished: {id}"),
+                None,
+                &LogFields::new(status_name(r.status), duration),
+            ),
+            Err(e) => log.error_with(
+                &format!("Task failed: {id}"),
+                Some(&json!({ "error": e.to_string() })),
+                &LogFields::new("failed", duration),
+            ),
+        }
         result
     }
 
@@ -358,6 +383,17 @@ fn action_to_capability(action: &str) -> &str {
     }
 }
 
+/// TaskStatus の JSON 表現（serde の snake_case と同じ）
+fn status_name(s: TaskStatus) -> &'static str {
+    match s {
+        TaskStatus::Pending => "pending",
+        TaskStatus::Running => "running",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Cancelled => "cancelled",
+    }
+}
+
 fn pattern_name(p: ExecutionPattern) -> &'static str {
     match p {
         ExecutionPattern::Sequential => "sequential",
@@ -434,5 +470,249 @@ mod tests {
         ));
         assert!(evaluate_condition(&json!("anything else"), &bad));
         assert!(evaluate_condition(&json!(true), &bad));
+    }
+
+    /// TS #44 の `executeTask` のログ（started / finished / failed）の移植のテスト（#61）
+    mod task_logging {
+        use super::*;
+        use crate::core::subagent::AgentBase;
+        use crate::types::{BehaviorConfig, InterfaceConfig, RoleConfig, SubagentConfig};
+        use crate::utils::logger::{LogLevel, LogSink};
+        use async_trait::async_trait;
+        use std::time::Duration;
+
+        /// capability `mock` を持つ Subagent。`parameters` で返り方を変える:
+        /// `fail: true` → Err、`status: "failed"` → Ok(Failed)、それ以外 → Ok(Completed)。
+        /// `sleep_ms` だけ待ってから返す。
+        struct Mock {
+            base: AgentBase,
+        }
+
+        impl Mock {
+            fn new() -> Self {
+                Mock {
+                    base: AgentBase::new(
+                        SubagentConfig {
+                            id: "mock".into(),
+                            name: "mock".into(),
+                            version: "0".into(),
+                            role: RoleConfig {
+                                description: String::new(),
+                                capabilities: vec!["mock".into()],
+                                constraints: None,
+                            },
+                            interface: InterfaceConfig {
+                                input: vec![],
+                                output: vec![],
+                            },
+                            tools: vec![],
+                            behavior: BehaviorConfig::default(),
+                        },
+                        vec![],
+                    ),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl Subagent for Mock {
+            fn base(&self) -> &AgentBase {
+                &self.base
+            }
+
+            async fn execute(&self, task: Task) -> Result<TaskResult> {
+                if let Some(ms) = task.parameters.get("sleep_ms").and_then(Value::as_u64) {
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                }
+                if task.param_truthy("fail") {
+                    return Err(Error::InvalidParameter("mock boom".into()));
+                }
+                let status =
+                    if task.parameters.get("status").and_then(Value::as_str) == Some("failed") {
+                        TaskStatus::Failed
+                    } else {
+                        TaskStatus::Completed
+                    };
+                Ok(TaskResult {
+                    task_id: task.id.clone(),
+                    ..res(status)
+                })
+            }
+        }
+
+        #[test]
+        fn status_name_matches_serde() {
+            for s in [
+                TaskStatus::Pending,
+                TaskStatus::Running,
+                TaskStatus::Completed,
+                TaskStatus::Failed,
+                TaskStatus::Cancelled,
+            ] {
+                assert_eq!(serde_json::to_value(s).unwrap(), status_name(s));
+            }
+        }
+
+        fn orchestrator() -> (Orchestrator, LogSink) {
+            let mut o = Orchestrator::new();
+            o.register_subagent(Arc::new(Mock::new()));
+            let (logger, sink) = Logger::capturing(Some("orchestrator".into()), LogLevel::Debug);
+            o.logger = logger;
+            (o, sink)
+        }
+
+        fn task(id: &str, action: &str, params: Value, cid: Option<&str>) -> Task {
+            let mut t = Task::new(id, action, params);
+            t.metadata = cid.map(|c| TaskMetadata {
+                correlation_id: Some(c.into()),
+                ..Default::default()
+            });
+            t
+        }
+
+        /// message が一致するログを 1 件だけ取り出す
+        fn entry(sink: &LogSink, message: &str) -> Value {
+            let es: Vec<Value> = sink
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|s| serde_json::from_str::<Value>(s).unwrap())
+                .filter(|e| e["message"] == message)
+                .collect();
+            assert_eq!(es.len(), 1, "{message}: {es:?}");
+            es.into_iter().next().unwrap()
+        }
+
+        #[tokio::test]
+        async fn started_and_finished_carry_task_context_status_and_duration() {
+            let (o, sink) = orchestrator();
+            let r = o
+                .execute_task(task("t1", "mock", json!({ "sleep_ms": 20 }), Some("c1")))
+                .await
+                .unwrap();
+            assert_eq!(r.status, TaskStatus::Completed);
+
+            let s = entry(&sink, "Executing task: t1");
+            assert_eq!(s["level"], "INFO");
+            assert_eq!(s["agent_id"], "orchestrator");
+            assert_eq!(s["task_id"], "t1");
+            assert_eq!(s["correlation_id"], "c1");
+            assert_eq!(s["status"], "started");
+            assert_eq!(s["data"], json!({ "action": "mock" }));
+            assert!(s.get("duration").is_none(), "{s}");
+
+            let f = entry(&sink, "Task finished: t1");
+            assert_eq!(f["level"], "INFO");
+            assert_eq!(f["task_id"], "t1");
+            assert_eq!(f["correlation_id"], "c1");
+            assert_eq!(f["status"], "completed");
+            // ms 単位であること（µs だと 20_000 以上になる）
+            let d = f["duration"].as_u64().unwrap();
+            assert!((20..10_000).contains(&d), "{f}");
+            assert!(f.get("data").is_none(), "{f}");
+        }
+
+        #[tokio::test]
+        async fn finished_uses_result_status_even_when_failed() {
+            let (o, sink) = orchestrator();
+            let r = o
+                .execute_task(task("t2", "mock", json!({ "status": "failed" }), None))
+                .await
+                .unwrap();
+            assert_eq!(r.status, TaskStatus::Failed);
+            let f = entry(&sink, "Task finished: t2");
+            assert_eq!(f["level"], "INFO");
+            assert_eq!(f["status"], "failed");
+            assert!(f["duration"].is_u64(), "{f}");
+        }
+
+        #[tokio::test]
+        async fn agent_error_logs_task_failed() {
+            let (o, sink) = orchestrator();
+            let e = o
+                .execute_task(task(
+                    "t3",
+                    "mock",
+                    json!({ "fail": true, "sleep_ms": 20 }),
+                    Some("c3"),
+                ))
+                .await
+                .unwrap_err();
+            let f = entry(&sink, "Task failed: t3");
+            assert_eq!(f["level"], "ERROR");
+            assert_eq!(f["task_id"], "t3");
+            assert_eq!(f["correlation_id"], "c3");
+            assert_eq!(f["status"], "failed");
+            let d = f["duration"].as_u64().unwrap();
+            assert!((20..10_000).contains(&d), "{f}");
+            assert_eq!(f["data"], json!({ "error": e.to_string() }));
+            assert!(
+                !sink
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.contains("Task finished")),
+                "finished must not be logged on error"
+            );
+            assert!(o.active_task_ids().is_empty());
+        }
+
+        #[tokio::test]
+        async fn no_capable_subagent_logs_task_failed() {
+            let (o, sink) = orchestrator();
+            let e = o
+                .execute_task(task("t4", "unknown_action", json!({}), None))
+                .await
+                .unwrap_err();
+            entry(&sink, "Executing task: t4");
+            let f = entry(&sink, "Task failed: t4");
+            assert_eq!(f["status"], "failed");
+            assert!(f["duration"].is_u64(), "{f}");
+            assert_eq!(f["data"]["error"], e.to_string());
+        }
+
+        #[tokio::test]
+        async fn task_without_correlation_id_does_not_inherit_another() {
+            let (o, sink) = orchestrator();
+            o.execute(
+                vec![
+                    task("a", "mock", json!({ "sleep_ms": 30 }), Some("ca")),
+                    task("b", "mock", json!({ "sleep_ms": 10 }), None),
+                ],
+                Some(ExecutionPattern::Parallel),
+            )
+            .await
+            .unwrap();
+            // a と b が実際に重なって走っている（b が先に終わる）
+            let order: Vec<String> = sink
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|s| serde_json::from_str::<Value>(s).unwrap())
+                .filter_map(|e| e["message"].as_str().map(str::to_string))
+                .filter(|m| m.starts_with("Executing task") || m.starts_with("Task finished"))
+                .collect();
+            assert_eq!(
+                order,
+                [
+                    "Executing task: a",
+                    "Executing task: b",
+                    "Task finished: b",
+                    "Task finished: a",
+                ]
+            );
+            for m in ["Executing task: a", "Task finished: a"] {
+                assert_eq!(entry(&sink, m)["correlation_id"], "ca", "{m}");
+            }
+            for m in ["Executing task: b", "Task finished: b"] {
+                let e = entry(&sink, m);
+                assert_eq!(e["task_id"], "b");
+                assert!(e.get("correlation_id").is_none(), "{m}: {e}");
+            }
+            // 親ロガーには task の文脈が残らない
+            assert_eq!(o.logger.context(), &LogContext::default());
+            let parsed = entry(&sink, "Parsed 2 task(s)");
+            assert!(parsed.get("task_id").is_none(), "{parsed}");
+        }
     }
 }
