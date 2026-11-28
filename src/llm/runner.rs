@@ -3,12 +3,21 @@
 //! - `end_turn` / `stop_sequence`: 終わり
 //! - `tool_use`: client tool を順に実行し、全 tool_result を 1 つの user message にまとめて送る
 //! - `refusal`: tool を実行せずに終わる（tool_use が途中で切れていることがある）
-//! - `max_tokens`: tool_use 付きなら実行せず、max_tokens を 1 回だけ増やして同じ履歴で再送。
+//! - `max_tokens`: tool_use 付きなら実行せず、max_tokens を増やして同じ履歴で再送。
+//!   増やすのは 1 回の run で 1 回だけで、増やした値はその run の残りの request でも使い続ける。
 //!   本文だけなら truncated で返す
 //! - `pause_turn`: assistant を末尾にしたまま再送する。続きの応答は同じ assistant message に足し、
 //!   role が続かないようにする
 //!
 //! 履歴は追記のみ（送った block は書き換えない）。回数・token 予算・deadline で打ち切る。
+//!
+//! deadline を過ぎると、実行中の tool の future はその場で drop される。tool の実装は
+//! cancel-safe にすること（子 process は `kill_on_drop(true)` にする、書き込みは一時 file から
+//! rename する、など）。LLM 呼び出しは [`LlmClient::create_message_until`] に deadline を渡す。
+//!
+//! LLM のエラーでも `Err` にはせず、それまでの回数・usage・履歴を [`RunStop::LlmError`] と
+//! [`RunOutcome::error`] で返す。課金された可能性があるエラー（`PossiblyBilled`）は
+//! その見積もりを 1 タスクの予算に数える。
 
 use std::sync::Arc;
 
@@ -16,7 +25,7 @@ use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use tokio::time::Instant;
 
-use super::client::LlmClient;
+use super::client::{LlmClient, LlmError};
 use super::config::TokenBudget;
 use super::types::{
     Message, MessageRequest, MessageResponse, Role, StopReason, ToolDef, ToolUse, Usage,
@@ -37,13 +46,16 @@ pub struct RunnerLimits {
     pub max_iterations: u32,
     /// 1 タスクの token 予算
     pub token_budget: Option<Arc<TokenBudget>>,
-    /// これを過ぎたら API も tool も打ち切る
+    /// これを過ぎたら API も tool も打ち切る（実行中の tool の future は drop される）
     pub deadline: Option<Instant>,
     /// pause_turn の続きを送る回数の上限
     pub max_pause_continuations: u32,
-    /// max_tokens を増やす時の上限
+    /// max_tokens を増やす時の上限（streaming しない request なので既定は 32000）
     pub max_tokens_ceiling: u32,
 }
+
+/// streaming しない request で max_tokens を増やす時の既定の上限
+pub const DEFAULT_MAX_TOKENS_CEILING: u32 = 32_000;
 
 impl Default for RunnerLimits {
     fn default() -> Self {
@@ -52,7 +64,7 @@ impl Default for RunnerLimits {
             token_budget: None,
             deadline: None,
             max_pause_continuations: 5,
-            max_tokens_ceiling: 64_000,
+            max_tokens_ceiling: DEFAULT_MAX_TOKENS_CEILING,
         }
     }
 }
@@ -71,16 +83,20 @@ pub enum RunStop {
     TokenBudget,
     Deadline,
     PauseLimit,
+    /// LLM 呼び出しのエラー（中身は [`RunOutcome::error`]）
+    LlmError,
     /// 未知の stop_reason など
     Other(String),
 }
 
 /// ループの結果
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RunOutcome {
     pub stop: RunStop,
-    /// 最後の応答の本文
+    /// 履歴の最後の assistant message の本文（pause_turn の続きを合わせたもの）
     pub text: String,
+    /// [`RunStop::LlmError`]（や deadline 中の送信失敗）の時のエラー
+    pub error: Option<LlmError>,
     /// 送った（送る予定だった）履歴
     pub messages: Vec<Message>,
     /// API を呼んだ回数
@@ -144,9 +160,24 @@ impl ConversationRunner {
             let mut req = self.template.clone();
             req.messages = state.messages.clone();
             req.max_tokens = max_tokens;
-            let resp = match self.with_deadline(self.client.create_message(&req)).await {
-                Some(r) => r?,
-                None => return Ok(state.finish(RunStop::Deadline)),
+            let resp = match self
+                .client
+                .create_message_until(&req, self.limits.deadline)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    // 課金された可能性がある分は 1 タスクの予算にも数える
+                    if let Some(b) = &self.limits.token_budget {
+                        b.charge(e.billed_estimate());
+                    }
+                    let stop = if matches!(e, LlmError::DeadlineExceeded) || self.past_deadline() {
+                        RunStop::Deadline
+                    } else {
+                        RunStop::LlmError
+                    };
+                    return Ok(state.fail(stop, e));
+                }
             };
             state.iterations += 1;
             state.add_usage(&resp.usage);
@@ -154,7 +185,13 @@ impl ConversationRunner {
                 b.charge(resp.usage.total());
             }
 
-            let tool_uses = resp.tool_uses();
+            let tool_uses = match resp.tool_uses() {
+                Ok(t) => t,
+                Err(e) => {
+                    state.last = Some(resp);
+                    return Ok(state.fail(RunStop::LlmError, e));
+                }
+            };
             match resp.stop_reason.clone() {
                 StopReason::EndTurn => return Ok(state.append_and_finish(resp, RunStop::EndTurn)),
                 StopReason::StopSequence => {
@@ -283,15 +320,40 @@ impl State {
     }
 
     fn finish(self, stop: RunStop) -> RunOutcome {
+        self.into_outcome(stop, None)
+    }
+
+    fn fail(self, stop: RunStop, error: LlmError) -> RunOutcome {
+        self.into_outcome(stop, Some(error))
+    }
+
+    fn into_outcome(self, stop: RunStop, error: Option<LlmError>) -> RunOutcome {
+        let text = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant)
+            .map(|m| text_of(&m.content))
+            .unwrap_or_default();
         RunOutcome {
             stop,
-            text: self.last.as_ref().map(|r| r.text()).unwrap_or_default(),
+            text,
+            error,
             messages: self.messages,
             iterations: self.iterations,
             usage: self.usage,
             last_response: self.last,
         }
     }
+}
+
+/// content block の text をつなげる（[`MessageResponse::text`] と同じ規則）
+fn text_of(content: &[Value]) -> String {
+    content
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(Value::as_str))
+        .collect()
 }
 
 /// tool 入力の簡易検証（object・required・1 段目の type / enum・additionalProperties:false）

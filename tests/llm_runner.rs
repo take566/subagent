@@ -440,17 +440,114 @@ async fn tool_errors_and_invalid_input_become_is_error_results() {
     assert_eq!(results[6]["content"], "ok:fine");
 }
 
+// LLM のエラーでも、それまでの回数・usage・履歴を捨てずに返す
 #[tokio::test]
-async fn llm_errors_propagate() {
-    let llm = Arc::new(ScriptedLlm::new(vec![Err(LlmError::Api {
-        status: 400,
-        error_type: "invalid_request_error".into(),
-        message: "bad".into(),
-        request_id: None,
-    })]));
-    let err = runner(llm, Arc::new(Recorder::default()), RunnerLimits::default())
+async fn llm_error_returns_partial_outcome() {
+    let llm = Arc::new(ScriptedLlm::new(vec![
+        resp(
+            StopReason::ToolUse,
+            vec![tool_use("toolu_1", "lookup", json!({"q": "a"}))],
+        ),
+        Err(LlmError::Api {
+            status: 400,
+            error_type: "invalid_request_error".into(),
+            message: "bad".into(),
+            request_id: None,
+        }),
+    ]));
+    let out = runner(llm, Arc::new(Recorder::default()), RunnerLimits::default())
         .run(vec![Message::user_text("go")])
         .await
-        .unwrap_err();
-    assert_eq!(err.name(), "LlmError");
+        .unwrap();
+    assert_eq!(out.stop, RunStop::LlmError);
+    assert!(
+        matches!(out.error, Some(LlmError::Api { status: 400, .. })),
+        "{:?}",
+        out.error
+    );
+    assert_eq!(out.iterations, 1);
+    assert_eq!(out.usage.total(), 20);
+    assert_eq!(out.messages.len(), 3, "user, assistant, tool_result kept");
+}
+
+#[tokio::test]
+async fn possibly_billed_errors_are_charged_to_the_task_budget() {
+    let llm = Arc::new(ScriptedLlm::new(vec![Err(LlmError::PossiblyBilled {
+        reason: "timed out after the request was sent".into(),
+        estimated_tokens: 1234,
+    })]));
+    let budget = Arc::new(TokenBudget::new(100_000));
+    let limits = RunnerLimits {
+        token_budget: Some(budget.clone()),
+        ..RunnerLimits::default()
+    };
+    let out = runner(llm, Arc::new(Recorder::default()), limits)
+        .run(vec![Message::user_text("go")])
+        .await
+        .unwrap();
+    assert_eq!(out.stop, RunStop::LlmError);
+    assert_eq!(budget.used(), 1234);
+}
+
+#[tokio::test]
+async fn malformed_tool_use_stops_with_decode_error_without_running_tools() {
+    let llm = Arc::new(ScriptedLlm::new(vec![resp(
+        StopReason::ToolUse,
+        vec![json!({"type": "tool_use", "name": "lookup", "input": {"q": "x"}})],
+    )]));
+    let rec = Arc::new(Recorder::default());
+    let out = runner(llm, rec.clone(), RunnerLimits::default())
+        .run(vec![Message::user_text("go")])
+        .await
+        .unwrap();
+    assert_eq!(out.stop, RunStop::LlmError);
+    assert!(
+        matches!(out.error, Some(LlmError::Decode(_))),
+        "{:?}",
+        out.error
+    );
+    assert!(rec.calls().is_empty());
+}
+
+// pause_turn の続きで終わった時、text は合わさった assistant message 全体から作る
+#[tokio::test]
+async fn text_comes_from_the_merged_assistant_message_after_pause_turn() {
+    let llm = Arc::new(ScriptedLlm::new(vec![
+        resp(
+            StopReason::PauseTurn,
+            vec![
+                text("first half, "),
+                json!({"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "x"}}),
+            ],
+        ),
+        resp(StopReason::EndTurn, vec![text("second half")]),
+    ]));
+    let out = runner(llm, Arc::new(Recorder::default()), RunnerLimits::default())
+        .run(vec![Message::user_text("go")])
+        .await
+        .unwrap();
+    assert_eq!(out.stop, RunStop::EndTurn);
+    assert_eq!(out.text, "first half, second half");
+}
+
+// max_tokens を増やす上限の既定は 32000（streaming しない request）
+#[tokio::test]
+async fn max_tokens_raise_is_capped_at_32000_by_default() {
+    assert_eq!(RunnerLimits::default().max_tokens_ceiling, 32_000);
+    let truncated = || {
+        resp(
+            StopReason::MaxTokens,
+            vec![tool_use("toolu_t", "lookup", json!({"q": "tru"}))],
+        )
+    };
+    let llm = Arc::new(ScriptedLlm::new(vec![truncated(), truncated()]));
+    let mut t = template();
+    t.max_tokens = 20_000;
+    let out = ConversationRunner::new(llm.clone(), t, Arc::new(Recorder::default()))
+        .run(vec![Message::user_text("go")])
+        .await
+        .unwrap();
+    assert_eq!(out.stop, RunStop::MaxTokensWithToolUse);
+    let reqs = llm.requests();
+    assert_eq!(reqs[1]["max_tokens"], 32_000);
 }

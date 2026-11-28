@@ -13,34 +13,41 @@ use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
 
 #[test]
 fn keys_in_env_do_not_make_default_constructed_code_call_the_api() {
+    // 先に port だけ取り、env を書き換えてから runtime と mock server を起こす
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let trap_uri = format!("http://{}", listener.local_addr().unwrap());
+
+    // SAFETY: この binary の test はこれ 1 本で、ここではまだ tokio runtime も mock server も
+    // 起こしていない（他に thread を作るものが無い）。harness の main thread は test の終わりを
+    // 待つだけで env を読まない。
+    unsafe {
+        std::env::set_var("SUBAGENT_ANTHROPIC_API_KEY", "sk-guard-sub");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-guard-generic");
+        for k in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            std::env::set_var(k, &trap_uri);
+        }
+        std::env::remove_var("NO_PROXY");
+        std::env::remove_var("no_proxy");
+    }
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     rt.block_on(async {
-        let trap = MockServer::start().await;
+        let trap = MockServer::builder().listener(listener).start().await;
+        assert_eq!(trap.uri(), trap_uri);
         Mock::given(any())
             .respond_with(ResponseTemplate::new(599))
             .mount(&trap)
             .await;
-
-        // SAFETY: この binary の test はこれ 1 本で、env を読む他の thread はまだ無い
-        unsafe {
-            std::env::set_var("SUBAGENT_ANTHROPIC_API_KEY", "sk-guard-sub");
-            std::env::set_var("ANTHROPIC_API_KEY", "sk-guard-generic");
-            for k in [
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-                "ALL_PROXY",
-                "http_proxy",
-                "https_proxy",
-                "all_proxy",
-            ] {
-                std::env::set_var(k, trap.uri());
-            }
-            std::env::remove_var("NO_PROXY");
-            std::env::remove_var("no_proxy");
-        }
 
         // 既定の client は Unconfigured
         let default = llm::default_client();

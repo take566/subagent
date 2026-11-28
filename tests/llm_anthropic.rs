@@ -253,13 +253,121 @@ async fn does_not_retry_after_read_timeout() {
         .await;
     let mut cfg = config(&server);
     cfg.request_timeout = Duration::from_millis(300);
-    let err = client(cfg)
+    let c = client(cfg).await;
+    let err = c.create_message(&request()).await.unwrap_err();
+    // 送った後に切れた分は課金された前提で、見積もりを 1 日の使用量に数える
+    match err {
+        LlmError::PossiblyBilled {
+            estimated_tokens, ..
+        } => {
+            assert!(estimated_tokens >= 64, "{estimated_tokens}");
+            assert_eq!(c.daily_used(), estimated_tokens);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(count(&server).await, 1, "a sent request must not be resent");
+}
+
+#[tokio::test]
+async fn deadline_bounds_the_request_and_counts_it_as_billed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(ok_body(1, 1))
+                .set_delay(Duration::from_secs(5)),
+        )
+        .mount(&server)
+        .await;
+    let mut cfg = config(&server);
+    cfg.request_timeout = Duration::from_secs(60);
+    let c = client(cfg).await;
+    let start = Instant::now();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    let err = c
+        .create_message_until(&request(), Some(deadline))
+        .await
+        .unwrap_err();
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(matches!(err, LlmError::PossiblyBilled { .. }), "{err:?}");
+    assert!(c.daily_used() > 0);
+
+    // 過ぎた deadline では送らない
+    let err = c
+        .create_message_until(&request(), Some(tokio::time::Instant::now()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LlmError::DeadlineExceeded), "{err:?}");
+    assert_eq!(count(&server).await, 1);
+}
+
+#[tokio::test]
+async fn unparseable_retry_after_is_not_retried_immediately() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT")
+                .set_body_json(err_body("rate_limit_error", "later")),
+        )
+        .mount(&server)
+        .await;
+    let err = client(config(&server))
         .await
         .create_message(&request())
         .await
         .unwrap_err();
-    assert!(matches!(err, LlmError::Timeout), "{err:?}");
-    assert_eq!(count(&server).await, 1, "a sent request must not be resent");
+    assert!(matches!(err, LlmError::Api { status: 429, .. }), "{err:?}");
+    assert_eq!(count(&server).await, 1);
+}
+
+#[tokio::test]
+async fn retry_after_is_honored_on_5xx_too() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(529)
+                .insert_header("retry-after", "1")
+                .set_body_json(err_body("overloaded_error", "busy")),
+        )
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(1, 1)))
+        .mount(&server)
+        .await;
+    let start = Instant::now();
+    client(config(&server))
+        .await
+        .create_message(&request())
+        .await
+        .unwrap();
+    assert!(
+        start.elapsed() >= Duration::from_millis(900),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(count(&server).await, 2);
+}
+
+#[tokio::test]
+async fn unbilled_errors_release_the_reservation() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(err_body("invalid_request_error", "no")),
+        )
+        .mount(&server)
+        .await;
+    let c = client(config(&server)).await;
+    let _ = c.create_message(&request()).await.unwrap_err();
+    assert_eq!(c.daily_used(), 0);
 }
 
 #[tokio::test]
@@ -339,18 +447,85 @@ async fn daily_cap_blocks_further_calls_without_sending() {
 }
 
 #[tokio::test]
-async fn decode_error_on_garbage_200() {
+async fn daily_cap_holds_under_concurrent_calls() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(ok_body(80, 40))
+                .set_delay(Duration::from_millis(50)),
+        )
+        .mount(&server)
+        .await;
+    let mut cfg = config(&server);
+    cfg.max_concurrency = 1;
+    cfg.max_tokens_per_day = 100;
+    let c = client(cfg).await;
+    let req = request();
+    let results = futures::future::join_all((0..8).map(|_| c.create_message(&req))).await;
+    let ok = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(ok, 1, "{results:?}");
+    for r in results.iter().filter(|r| r.is_err()) {
+        assert!(
+            matches!(
+                r,
+                Err(LlmError::BudgetExceeded {
+                    scope: BudgetScope::Daily,
+                    ..
+                })
+            ),
+            "{r:?}"
+        );
+    }
+    assert_eq!(
+        count(&server).await,
+        1,
+        "requests queued behind the permit must re-check the cap"
+    );
+    assert_eq!(c.daily_used(), 120);
+}
+
+#[tokio::test]
+async fn reservations_block_parallel_calls_from_overshooting() {
+    // 同時 4 本でも、予約（max_tokens + 入力の見積もり）で上限を超えて送らない
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(ok_body(80, 40))
+                .set_delay(Duration::from_millis(100)),
+        )
+        .mount(&server)
+        .await;
+    let mut cfg = config(&server);
+    cfg.max_concurrency = 4;
+    cfg.max_tokens_per_day = 100;
+    let c = client(cfg).await;
+    let req = request();
+    let _ = futures::future::join_all((0..8).map(|_| c.create_message(&req))).await;
+    assert_eq!(count(&server).await, 1);
+}
+
+#[tokio::test]
+async fn garbage_200_is_counted_as_possibly_billed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
         .mount(&server)
         .await;
-    let err = client(config(&server))
-        .await
-        .create_message(&request())
-        .await
-        .unwrap_err();
-    assert!(matches!(err, LlmError::Decode(_)), "{err:?}");
+    let c = client(config(&server)).await;
+    let err = c.create_message(&request()).await.unwrap_err();
+    match err {
+        LlmError::PossiblyBilled {
+            reason,
+            estimated_tokens,
+        } => {
+            assert!(reason.contains("decode"), "{reason}");
+            assert_eq!(c.daily_used(), estimated_tokens);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(count(&server).await, 1);
 }
 
 #[tokio::test]

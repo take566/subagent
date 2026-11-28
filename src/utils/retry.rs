@@ -69,6 +69,11 @@ impl RetryManager {
                 Ok(v) => return Ok(v),
                 Err(err) => {
                     on_retry(attempt, &err);
+                    // LLM 呼び出しの retry は client の中だけで行う。ここで重ねると、
+                    // 送信後に失敗した request を送り直して二重に課金されうる
+                    if matches!(err, Error::Llm(_)) {
+                        return Err(err);
+                    }
                     if !self.can_retry(attempt) {
                         self.logger
                             .warn(&format!("Max retries reached ({max})"), None);
@@ -145,6 +150,31 @@ mod tests {
             .await;
         assert_eq!(r.unwrap(), 42);
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn llm_errors_are_never_retried() {
+        // LLM の retry は client の中だけ。ここで包んでも二重に送らない（二重課金の防止）
+        let m = mgr(Backoff::Fixed, 5, 1);
+        let calls = AtomicU32::new(0);
+        let mut seen = vec![];
+        let r: Result<()> = m
+            .execute_with_retry_cb(
+                || async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(Error::Llm(crate::llm::LlmError::Api {
+                        status: 529,
+                        error_type: "overloaded_error".into(),
+                        message: "busy".into(),
+                        request_id: None,
+                    }))
+                },
+                |a, _| seen.push(a),
+            )
+            .await;
+        assert_eq!(r.unwrap_err().name(), "LlmError");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(seen, vec![1]);
     }
 
     #[tokio::test]

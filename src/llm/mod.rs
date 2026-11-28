@@ -25,7 +25,9 @@ pub use config::{ApiKey, LlmConfig, TokenBudget};
 #[cfg(feature = "replay")]
 pub use fake::ReplayLlm;
 pub use fake::ScriptedLlm;
-pub use runner::{ConversationRunner, RunOutcome, RunStop, RunnerLimits, ToolHandler};
+pub use runner::{
+    ConversationRunner, DEFAULT_MAX_TOKENS_CEILING, RunOutcome, RunStop, RunnerLimits, ToolHandler,
+};
 pub use types::{
     CacheControl, CacheType, DEFAULT_MODEL, Effort, Message, MessageRequest, MessageResponse,
     OutputConfig, Role, StopReason, TEXT_EDITOR_NAME, TEXT_EDITOR_TYPE, ThinkingConfig,

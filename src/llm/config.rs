@@ -49,12 +49,18 @@ pub struct LlmConfig {
     pub max_concurrency: usize,
     /// 最初の送信のあとに retry する回数
     pub max_retries: u32,
-    /// 指数 backoff の基準
+    /// 指数 backoff の基準（jitter 付き）
     pub retry_base_delay: Duration,
-    /// これより長い `retry-after` は待たずに失敗する
+    /// backoff の上限
+    pub max_backoff: Duration,
+    /// これより長い `retry-after` は待たずに失敗する（解釈できない値も retry しない）
     pub max_retry_after: Duration,
     pub connect_timeout: Duration,
-    /// 1 request 全体の timeout（送信後に切れたら retry しない）
+    /// 1 request 全体の timeout（送信後に切れたら retry しない）。
+    ///
+    /// 既定の 600s は streaming しない request の上限の目安で、1 応答の生成に数分かかる
+    /// 大きな `max_tokens` を許すための値。deadline 付きで呼ぶ時
+    /// （[`super::LlmClient::create_message_until`]）は残り時間までに縮める。
     pub request_timeout: Duration,
     /// process 単位の 1 日の token 上限
     pub max_tokens_per_day: u64,
@@ -69,6 +75,7 @@ impl LlmConfig {
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
             max_retries: 2,
             retry_base_delay: Duration::from_millis(500),
+            max_backoff: Duration::from_secs(8),
             max_retry_after: Duration::from_secs(60),
             connect_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(600),

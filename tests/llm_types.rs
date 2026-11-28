@@ -161,11 +161,58 @@ fn assistant_content_round_trips_verbatim_including_unknown_blocks() {
 fn response_helpers_read_text_and_client_tool_uses_only() {
     let resp: MessageResponse = serde_json::from_value(rich_response()).unwrap();
     assert_eq!(resp.text(), "Serde is a framework.");
-    let uses = resp.tool_uses();
+    let uses = resp.tool_uses().expect("well-formed tool_use");
     assert_eq!(uses.len(), 1, "server_tool_use is not a client tool call");
     assert_eq!(uses[0].id, "toolu_01");
     assert_eq!(uses[0].name, "get_weather");
     assert_eq!(uses[0].input, json!({"location": "Paris"}));
+}
+
+#[test]
+fn tool_use_without_id_or_name_is_a_decode_error_not_an_empty_id() {
+    for block in [
+        json!({"type": "tool_use", "name": "get_weather", "input": {}}),
+        json!({"type": "tool_use", "id": "", "name": "get_weather", "input": {}}),
+        json!({"type": "tool_use", "id": "toolu_1", "input": {}}),
+        json!({"type": "tool_use", "id": 7, "name": "get_weather", "input": {}}),
+    ] {
+        let mut v = rich_response();
+        v["content"] = json!([block.clone()]);
+        let resp: MessageResponse = serde_json::from_value(v).unwrap();
+        match resp.tool_uses() {
+            Err(LlmError::Decode(msg)) => assert!(msg.contains("tool_use"), "{msg}"),
+            other => panic!("{block}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn custom_tool_options_are_sent_but_cannot_override_core_fields() {
+    let tool = ToolDef::custom("lookup", "look up", json!({"type": "object"}))
+        .with_option("strict", json!(true))
+        .with_option("cache_control", json!({"type": "ephemeral"}))
+        .with_option("eager_input_streaming", json!(true))
+        .with_option("name", json!("hijack"))
+        .with_option("input_schema", json!({}));
+    assert_eq!(
+        serde_json::to_value(&tool).unwrap(),
+        json!({
+            "name": "lookup",
+            "description": "look up",
+            "input_schema": {"type": "object"},
+            "strict": true,
+            "cache_control": {"type": "ephemeral"},
+            "eager_input_streaming": true
+        })
+    );
+    let editor = ToolDef::text_editor()
+        .with_option("max_characters", json!(10000))
+        .with_option("type", json!("bash_20250124"));
+    assert_eq!(
+        serde_json::to_value(&editor).unwrap(),
+        json!({"type": "text_editor_20250728", "name": "str_replace_based_edit_tool",
+               "max_characters": 10000})
+    );
 }
 
 #[test]
