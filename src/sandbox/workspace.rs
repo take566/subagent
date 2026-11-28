@@ -12,6 +12,10 @@
 //!   最後の component は link を辿らずに開く（Unix は `O_NOFOLLOW | O_NONBLOCK`、Windows は
 //!   `FILE_FLAG_OPEN_REPARSE_POINT`）。無いディレクトリは 1 段ずつ作り、作るたびに root の中か確かめる
 //! - リンク数が 2 以上のファイル（ハードリンク）は読みも書きもしない
+//! - root からの相対 component に `.git`（大文字小文字は問わない）がある path には、どの経路でも
+//!   書かない（hook や `core.fsmonitor` で、後で git を使った時にホストでコードが動くため）。
+//!   字面・既存部分の canonical な path・open した handle の実 path のそれぞれで見るので、
+//!   8.3 の短い名前（`GIT~1`）でも抜けない。読むのは拒否しない
 //! - 1 ファイルのサイズと、1 タスクで書き込むファイルの件数に上限を置く
 //! - ファイル操作は 1 つずつ（内部の lock で直列化する）。コマンドの実行とは直列化しない
 //! - エラーには呼び出し側の相対 path だけを載せる（root の外の実 path は載せない）
@@ -61,6 +65,10 @@ pub struct FileChange {
     pub path: String,
     pub kind: ChangeKind,
 }
+
+/// 書いてよいかの確認（`*_tracked` の書き込みの直前、Workspace の lock の中で呼ぶ）。
+/// `Err` の理由はそのままエラーになり、何も書かない（ディレクトリも作らない）
+pub type MayWrite<'a> = &'a dyn Fn() -> std::result::Result<(), String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceLimits {
@@ -132,6 +140,18 @@ fn is_reserved_name(part: &str) -> bool {
             rest.as_str(),
             "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
         )
+}
+
+/// `.git` か（大文字小文字は問わない）
+fn is_git_component(c: &std::ffi::OsStr) -> bool {
+    c.to_string_lossy().eq_ignore_ascii_case(".git")
+}
+
+fn git_denied(shown: &str) -> Error {
+    deny(format!(
+        "writing inside .git is not allowed: {shown:?} (git hooks and config would run code \
+         on the host)"
+    ))
 }
 
 /// 相対 path を検証して component に分ける（`/` と `\` のどちらも区切りとして扱う）。
@@ -594,12 +614,28 @@ impl Workspace {
             .map_err(|_| Error::InvalidParameter(format!("{shown} is not valid UTF-8 text")))
     }
 
+    /// `real`（canonical な path）の root からの相対 component に `.git` があれば拒否する。
+    /// 大文字小文字は問わない。canonical な path で見るので 8.3 の短い名前（`GIT~1`）でも抜けない
+    fn deny_git(&self, real: &Path, shown: &str) -> Result<()> {
+        let hit = self
+            .roots
+            .iter()
+            .filter_map(|r| real.strip_prefix(&r.canonical).ok())
+            .any(|rel| rel.components().any(|c| is_git_component(c.as_os_str())));
+        if hit { Err(git_denied(shown)) } else { Ok(()) }
+    }
+
+    /// 書き込み。`may_write` は lock の中（呼び出し側が持つ）で、ディレクトリを作る前に呼ぶ
     fn write_locked(
         &self,
         changes: &mut Vec<FileChange>,
+        may_write: Option<MayWrite<'_>>,
         rel: &str,
         content: &str,
     ) -> Result<ChangeKind> {
+        if let Some(check) = may_write {
+            check().map_err(Error::Other)?;
+        }
         if content.len() as u64 > self.limits.max_file_bytes {
             return Err(deny(format!(
                 "content is larger than the limit ({} > {} bytes)",
@@ -609,6 +645,13 @@ impl Workspace {
         }
         let parts = validate_relative(rel)?;
         let shown = parts.join("/");
+        // .git の下（hook・config）に書けると、後で git を使った時にホストでコードが動く
+        if parts
+            .iter()
+            .any(|p| is_git_component(std::ffi::OsStr::new(p)))
+        {
+            return Err(git_denied(&shown));
+        }
         let tracked = changes.iter().any(|c| c.path == shown);
         if !tracked && changes.len() >= self.limits.max_files {
             return Err(deny(format!(
@@ -617,6 +660,8 @@ impl Workspace {
             )));
         }
         let (mut dir, i) = self.resolve_split(&parts, rel)?;
+        // 既存の部分は canonical な path で見る（8.3 の短い名前・root 内の link 経由）
+        self.deny_git(&dir, &shown)?;
         let path = if i == parts.len() {
             dir
         } else {
@@ -630,6 +675,7 @@ impl Workspace {
                 }
                 dir = std::fs::canonicalize(&next).map_err(|e| Error::io_at(&shown, e))?;
                 self.ensure_inside(&dir, rel)?;
+                self.deny_git(&dir, &shown)?;
             }
             dir.join(&parts[parts.len() - 1])
         };
@@ -640,6 +686,9 @@ impl Workspace {
             .open(&path)
             .map_err(|e| open_error(&shown, e))?;
         self.check_opened(&file, &shown)?;
+        // open した handle の実 path でも見る（既存ファイルの短い名前、resolve と open の間の差し替え）
+        let real = self.verify_handle(&file, &shown)?;
+        self.deny_git(&real, &shown)?;
         file.set_len(0).map_err(|e| Error::io_at(&shown, e))?;
         file.write_all(content.as_bytes())
             .map_err(|e| Error::io_at(&shown, e))?;
@@ -663,7 +712,7 @@ impl Workspace {
     /// ファイルを作る（あれば上書き）。親ディレクトリも作る
     pub fn create(&self, rel: &str, content: &str) -> Result<ChangeKind> {
         let mut changes = self.lock();
-        self.write_locked(&mut changes, rel, content)
+        self.write_locked(&mut changes, None, rel, content)
     }
 
     /// [`Self::create`] と同じだが、記録と件数の上限は全体（[`Self::changes`]）ではなく `log` を使う。
@@ -672,46 +721,50 @@ impl Workspace {
     pub fn create_tracked(
         &self,
         log: &mut Vec<FileChange>,
+        may_write: MayWrite<'_>,
         rel: &str,
         content: &str,
     ) -> Result<ChangeKind> {
         let _guard = self.lock();
-        self.write_locked(log, rel, content)
+        self.write_locked(log, Some(may_write), rel, content)
     }
 
     /// [`Self::str_replace`] の `log` 版（[`Self::create_tracked`] を参照）
     pub fn str_replace_tracked(
         &self,
         log: &mut Vec<FileChange>,
+        may_write: MayWrite<'_>,
         rel: &str,
         old: &str,
         new: &str,
     ) -> Result<()> {
         let _guard = self.lock();
-        self.str_replace_locked(log, rel, old, new)
+        self.str_replace_locked(log, Some(may_write), rel, old, new)
     }
 
     /// [`Self::insert`] の `log` 版（[`Self::create_tracked`] を参照）
     pub fn insert_tracked(
         &self,
         log: &mut Vec<FileChange>,
+        may_write: MayWrite<'_>,
         rel: &str,
         after_line: usize,
         text: &str,
     ) -> Result<()> {
         let _guard = self.lock();
-        self.insert_locked(log, rel, after_line, text)
+        self.insert_locked(log, Some(may_write), rel, after_line, text)
     }
 
     /// `old` がちょうど 1 回現れるときだけ `new` に置き換える（どちらもリテラル）
     pub fn str_replace(&self, rel: &str, old: &str, new: &str) -> Result<()> {
         let mut changes = self.lock();
-        self.str_replace_locked(&mut changes, rel, old, new)
+        self.str_replace_locked(&mut changes, None, rel, old, new)
     }
 
     fn str_replace_locked(
         &self,
         changes: &mut Vec<FileChange>,
+        may_write: Option<MayWrite<'_>>,
         rel: &str,
         old: &str,
         new: &str,
@@ -728,7 +781,8 @@ impl Workspace {
             ))),
             1 => {
                 let updated = content.replacen(old, new, 1);
-                self.write_locked(changes, rel, &updated).map(|_| ())
+                self.write_locked(changes, may_write, rel, &updated)
+                    .map(|_| ())
             }
             n => Err(Error::InvalidParameter(format!(
                 "Found {n} matches for `old_str` in {rel}; it must match exactly once \
@@ -748,7 +802,7 @@ impl Workspace {
         };
         if n > 0 {
             let updated = content.replace(search, replace);
-            self.write_locked(&mut changes, rel, &updated)?;
+            self.write_locked(&mut changes, None, rel, &updated)?;
         }
         Ok(n)
     }
@@ -756,12 +810,13 @@ impl Workspace {
     /// `after_line` 行目の後ろ（0 なら先頭）に `text` を行として挿入する
     pub fn insert(&self, rel: &str, after_line: usize, text: &str) -> Result<()> {
         let mut changes = self.lock();
-        self.insert_locked(&mut changes, rel, after_line, text)
+        self.insert_locked(&mut changes, None, rel, after_line, text)
     }
 
     fn insert_locked(
         &self,
         changes: &mut Vec<FileChange>,
+        may_write: Option<MayWrite<'_>>,
         rel: &str,
         after_line: usize,
         text: &str,
@@ -783,7 +838,7 @@ impl Workspace {
             out.push('\n');
         }
         out.push_str(&lines[after_line..].concat());
-        self.write_locked(changes, rel, &out).map(|_| ())
+        self.write_locked(changes, may_write, rel, &out).map(|_| ())
     }
 
     /// 行番号付きで表示する。`range` は 1 始まりの (開始, 終了)。終了 None は末尾まで

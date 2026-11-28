@@ -75,6 +75,23 @@ fn err_text(e: Error) -> String {
     e.to_string()
 }
 
+/// 途中で止まった呼び出しのエラー: (短い message, 途中の結果)
+fn incomplete(e: Error) -> (String, Value) {
+    match e {
+        Error::Incomplete { message, partial } => (message, *partial),
+        other => panic!("expected Error::Incomplete, got {other:?}"),
+    }
+}
+
+/// `files` / `test_files`（`[{path, kind}]`）の path だけ
+fn paths(v: &Value) -> Vec<String> {
+    v.as_array()
+        .unwrap_or_else(|| panic!("not an array: {v}"))
+        .iter()
+        .map(|e| e["path"].as_str().unwrap().to_string())
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // request の形
 // ---------------------------------------------------------------------------
@@ -149,8 +166,20 @@ async fn happy_path_writes_files_and_reports_them() {
         .call_typed(json!({"task": "write lib"}), ctx())
         .await
         .unwrap();
-    assert_eq!(r["files"], json!(["src/lib.rs", "existing.txt"]), "{r}");
-    assert_eq!(r["test_files"], json!(["tests/lib_test.rs"]), "{r}");
+    // 上書き・変更は kind で分かる
+    assert_eq!(
+        r["files"],
+        json!([
+            {"path": "src/lib.rs", "kind": "created"},
+            {"path": "existing.txt", "kind": "modified"}
+        ]),
+        "{r}"
+    );
+    assert_eq!(
+        r["test_files"],
+        json!([{"path": "tests/lib_test.rs", "kind": "created"}]),
+        "{r}"
+    );
     assert_eq!(r["summary"], "Added lib and test.");
     assert_eq!(r["iterations"], 6);
     assert_eq!(r["tokens_used"], 120);
@@ -208,6 +237,9 @@ async fn bad_tool_calls_are_is_error_and_stay_inside_the_workspace() {
         json!({"command": "view", "path": "missing.txt"}),
         json!({"command": "insert", "path": "a.txt", "insert_line": 99, "insert_text": "y"}),
         json!({"path": "a.txt"}),
+        // "/" は絶対パスとして拒否する（root の一覧にはしない）
+        json!({"command": "view", "path": "/"}),
+        json!({"command": "view", "path": "\\"}),
     ];
     let n = bad.len();
     let blocks = bad
@@ -414,10 +446,53 @@ async fn stops_other_than_end_turn_are_errors_with_the_partial_result() {
             .call_typed(json!({"task": "t"}), ctx())
             .await
             .unwrap_err();
-        let msg = err_text(e);
-        assert!(msg.contains(needle), "{label}: {msg}");
+        let (msg, partial) = incomplete(e);
+        // 途中の結果は構造化して返し、message（ログに出る）には載せない
+        assert!(partial.to_string().contains(needle), "{label}: {partial}");
+        assert!(!msg.contains(needle) || needle == "refusal" || needle == "max_tokens");
         assert!(msg.contains("stop_reason"), "{label}: {msg}");
+        assert!(!msg.contains('{'), "{label}: {msg}");
     }
+}
+
+/// message は stop_reason と件数だけ。モデルの本文や API のエラーの中身は載せない
+#[tokio::test]
+async fn error_message_carries_no_model_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = Arc::new(ScriptedLlm::new(vec![
+        uses(vec![
+            json!({"type": "text", "text": "SECRET-MODEL-TEXT"}),
+            tool_use(
+                "w",
+                json!({"command": "create", "path": "p.txt", "file_text": "SECRET-FILE"}),
+            ),
+        ]),
+        Err(LlmError::Api {
+            status: 500,
+            error_type: "api_error".into(),
+            message: "SECRET-API-MESSAGE".into(),
+            request_id: None,
+        }),
+    ]));
+    let (msg, partial) = incomplete(
+        agent(dir.path(), llm)
+            .call_typed(json!({"task": "t"}), ctx())
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(
+        msg,
+        "codegen did not finish (stop_reason: llm_error, 1 file changed)"
+    );
+    assert_eq!(partial["stop_reason"], "llm_error");
+    assert_eq!(partial["summary"], "SECRET-MODEL-TEXT");
+    assert!(
+        partial["error"]
+            .as_str()
+            .unwrap()
+            .contains("SECRET-API-MESSAGE")
+    );
+    assert_eq!(paths(&partial["files"]), ["p.txt"]);
 }
 
 #[tokio::test]
@@ -435,7 +510,9 @@ async fn token_budget_stops_with_an_error() {
     let a = CodeGenAgent::with_sandbox(CodeGenAgent::default_config(), sandbox(dir.path()))
         .with_llm(llm, s);
     let e = a.call_typed(json!({"task": "t"}), ctx()).await.unwrap_err();
-    assert!(err_text(e).contains("token_budget"));
+    let (msg, partial) = incomplete(e);
+    assert!(msg.contains("token_budget"), "{msg}");
+    assert_eq!(partial["tokens_used"], 20);
     assert!(!dir.path().join("a.txt").exists());
 }
 
@@ -456,7 +533,7 @@ async fn max_iterations_stops_with_an_error() {
     let a = CodeGenAgent::with_sandbox(CodeGenAgent::default_config(), sandbox(dir.path()))
         .with_llm(llm.clone(), s);
     let e = a.call_typed(json!({"task": "t"}), ctx()).await.unwrap_err();
-    assert!(err_text(e).contains("max_iterations"));
+    assert!(incomplete(e).0.contains("max_iterations"));
     assert_eq!(llm.requests().len(), 2);
 }
 
@@ -504,8 +581,54 @@ async fn no_write_lands_after_the_deadline() {
         .call_typed(json!({"task": "t"}), ctx())
         .await
         .unwrap_err();
-    assert!(err_text(e).contains("deadline"));
+    assert!(incomplete(e).0.contains("deadline"));
     assert!(!dir.path().join("late.txt").exists());
+}
+
+/// LLM の応答を待つ間に cancel されたら、それまでの回数・usage を返す（0 にしない）
+#[tokio::test]
+async fn cancel_while_waiting_keeps_the_usage_so_far() {
+    struct CancelOnSecond {
+        token: CancellationToken,
+        calls: Mutex<u32>,
+    }
+    #[async_trait]
+    impl LlmClient for CancelOnSecond {
+        async fn create_message(&self, _: &MessageRequest) -> Result<MessageResponse, LlmError> {
+            let n = {
+                let mut c = self.calls.lock().unwrap();
+                *c += 1;
+                *c
+            };
+            if n == 1 {
+                return uses(vec![tool_use(
+                    "w",
+                    json!({"command": "create", "path": "first.txt", "file_text": "1"}),
+                )]);
+            }
+            self.token.cancel();
+            std::future::pending().await
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let token = CancellationToken::new();
+    let llm = Arc::new(CancelOnSecond {
+        token: token.clone(),
+        calls: Mutex::new(0),
+    });
+    let mut c = ctx();
+    c.cancel = token;
+    let (msg, partial) = incomplete(
+        agent(dir.path(), llm)
+            .call_typed(json!({"task": "t"}), c)
+            .await
+            .unwrap_err(),
+    );
+    assert!(msg.contains("cancelled"), "{msg}");
+    assert_eq!(partial["stop_reason"], "cancelled");
+    assert_eq!(partial["iterations"], 1, "{partial}");
+    assert_eq!(partial["tokens_used"], 20, "{partial}");
+    assert_eq!(paths(&partial["files"]), ["first.txt"]);
 }
 
 #[tokio::test]
@@ -523,7 +646,7 @@ async fn no_write_lands_after_cancel() {
         .call_typed(json!({"task": "t"}), c)
         .await
         .unwrap_err();
-    assert!(err_text(e).contains("cancel"));
+    assert!(incomplete(e).0.contains("cancel"));
     assert!(!dir.path().join("late.txt").exists());
 }
 
@@ -614,10 +737,260 @@ async fn concurrent_calls_record_their_own_files() {
         }
     );
     let (ra, rb) = (ra.unwrap(), rb.unwrap());
-    assert_eq!(ra["files"], json!(["a/one.txt"]), "{ra}");
-    assert_eq!(ra["test_files"], json!(["a/two_test.rs"]), "{ra}");
-    assert_eq!(rb["files"], json!(["b/one.txt"]), "{rb}");
-    assert_eq!(rb["test_files"], json!(["b/two_test.rs"]), "{rb}");
+    assert_eq!(paths(&ra["files"]), ["a/one.txt"], "{ra}");
+    assert_eq!(paths(&ra["test_files"]), ["a/two_test.rs"], "{ra}");
+    assert_eq!(paths(&rb["files"]), ["b/one.txt"], "{rb}");
+    assert_eq!(paths(&rb["test_files"]), ["b/two_test.rs"], "{rb}");
     // 全体の記録（begin_task 式）は使わない
     assert!(sb.workspace().unwrap().changes().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// .git には書かない（hook や core.fsmonitor でホストのコードが動く）
+// ---------------------------------------------------------------------------
+
+fn one_turn(inputs: Vec<Value>) -> Arc<ScriptedLlm> {
+    let blocks = inputs
+        .into_iter()
+        .enumerate()
+        .map(|(i, input)| tool_use(&format!("u{i}"), input))
+        .collect();
+    Arc::new(ScriptedLlm::new(vec![uses(blocks), done("done")]))
+}
+
+#[tokio::test]
+async fn text_editor_cannot_write_into_dot_git() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".git/hooks")).unwrap();
+    std::fs::write(dir.path().join(".git/config"), "[core]\n").unwrap();
+    let mut inputs = vec![
+        json!({"command": "create", "path": ".git/hooks/pre-commit", "file_text": "#!/bin/sh\nevil\n"}),
+        json!({"command": "create", "path": ".GIT/config", "file_text": "[core]\nfsmonitor = evil\n"}),
+        json!({"command": "create", "path": "sub/.Git/hooks/post-checkout", "file_text": "x"}),
+        json!({"command": "create", "path": ".git", "file_text": "gitdir: /elsewhere\n"}),
+        json!({"command": "str_replace", "path": ".git/config", "old_str": "[core]", "new_str": "[core]\nfsmonitor = evil"}),
+        json!({"command": "insert", "path": ".git/config", "insert_line": 1, "insert_text": "fsmonitor = evil"}),
+    ];
+    // 8.3 の短い名前（GIT~1）が使える volume なら、それでも抜けられない
+    let has_short = std::fs::metadata(dir.path().join("GIT~1")).is_ok_and(|m| m.is_dir());
+    if has_short {
+        inputs.push(json!({"command": "create", "path": "GIT~1/hooks/pre-push", "file_text": "x"}));
+        inputs.push(json!({"command": "str_replace", "path": "GIT~1/config", "old_str": "[core]", "new_str": "x"}));
+    } else {
+        eprintln!("8.3 short names are not available here; skipping the GIT~1 case");
+    }
+    let n = inputs.len();
+    let llm = one_turn(inputs);
+    let r = agent(dir.path(), llm.clone())
+        .call_typed(json!({"task": "t"}), ctx())
+        .await
+        .unwrap();
+    let results = tool_results(&llm.requests()[1], 2);
+    assert_eq!(results.len(), n);
+    for b in &results {
+        assert_eq!(b["is_error"], true, "{b}");
+        assert!(b["content"].as_str().unwrap().contains(".git"), "{b}");
+    }
+    assert_eq!(r["files"], json!([]));
+    assert!(!dir.path().join(".git/hooks/pre-commit").exists());
+    assert!(!dir.path().join(".git/hooks/pre-push").exists());
+    assert!(!dir.path().join("sub").join(".Git").exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".git/config")).unwrap(),
+        "[core]\n"
+    );
+    // .git を含まない似た名前は書ける
+    let llm = one_turn(vec![
+        json!({"command": "create", "path": ".github/workflows/ci.yml", "file_text": "x"}),
+        json!({"command": "create", "path": "a.git/x", "file_text": "x"}),
+        json!({"command": "create", "path": ".gitignore", "file_text": "x"}),
+    ]);
+    let r = agent(dir.path(), llm)
+        .call_typed(json!({"task": "t"}), ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        paths(&r["files"]),
+        [".github/workflows/ci.yml", "a.git/x", ".gitignore"]
+    );
+}
+
+/// direct tool（file_create / str_replace）も同じ Workspace の規則で .git を拒否する
+#[tokio::test]
+async fn direct_tools_cannot_write_into_dot_git() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join(".git/config"), "[core]\n").unwrap();
+    let a = CodeGenAgent::with_sandbox(CodeGenAgent::default_config(), sandbox(dir.path()));
+    let params = |v: Value| v.as_object().unwrap().clone();
+    for p in [".git/hooks/pre-commit", ".Git/config"] {
+        let e = a
+            .base()
+            .invoke_tool(
+                "file_create",
+                params(json!({"path": p, "content": "#!/bin/sh\nevil\n"})),
+            )
+            .await
+            .unwrap_err();
+        assert!(err_text(e).contains(".git"), "{p}");
+    }
+    let e = a
+        .base()
+        .invoke_tool(
+            "str_replace",
+            params(json!({"file": ".git/config", "search": "[core]", "replace": "evil"})),
+        )
+        .await
+        .unwrap_err();
+    assert!(err_text(e).contains(".git"));
+    assert!(!dir.path().join(".git/hooks").exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".git/config")).unwrap(),
+        "[core]\n"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 出力の上限
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn view_is_truncated_at_100k_chars() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = format!("{}\n", "x".repeat(99));
+    std::fs::write(dir.path().join("big.txt"), line.repeat(1500)).unwrap(); // 15 万文字
+    let llm = one_turn(vec![json!({"command": "view", "path": "big.txt"})]);
+    agent(dir.path(), llm.clone())
+        .call_typed(json!({"task": "t"}), ctx())
+        .await
+        .unwrap();
+    let out = tool_results(&llm.requests()[1], 2)[0]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        out.contains("[truncated: showed 100000 of"),
+        "{}",
+        &out[out.len() - 200..]
+    );
+    assert!(out.chars().count() < 100_200);
+}
+
+#[tokio::test]
+async fn directory_listing_is_truncated_at_500_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..600 {
+        std::fs::write(dir.path().join(format!("f{i:03}.txt")), "").unwrap();
+    }
+    let llm = one_turn(vec![json!({"command": "view", "path": "."})]);
+    agent(dir.path(), llm.clone())
+        .call_typed(json!({"task": "t"}), ctx())
+        .await
+        .unwrap();
+    let out = tool_results(&llm.requests()[1], 2)[0]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(out.contains("[listing truncated at 500 entries]"), "{out}");
+    assert_eq!(out.lines().filter(|l| l.ends_with(".txt")).count(), 500);
+}
+
+/// 1 回の応答の tool_result の合計は 20 万文字まで。超えた分は is_error（view_range を促す）。
+/// 次の応答では数え直す
+#[tokio::test]
+async fn tool_results_of_one_turn_are_capped() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = format!("{}\n", "y".repeat(89));
+    std::fs::write(dir.path().join("f.txt"), line.repeat(1000)).unwrap(); // 9 万文字
+    let view = json!({"command": "view", "path": "f.txt"});
+    let llm = Arc::new(ScriptedLlm::new(vec![
+        uses(vec![
+            tool_use("a", view.clone()),
+            tool_use("b", view.clone()),
+            tool_use("c", view.clone()),
+        ]),
+        uses(vec![tool_use("d", view.clone())]),
+        done("ok"),
+    ]));
+    agent(dir.path(), llm.clone())
+        .call_typed(json!({"task": "t"}), ctx())
+        .await
+        .unwrap();
+    let reqs = llm.requests();
+    let first = tool_results(&reqs[1], 2);
+    assert!(first[0].get("is_error").is_none());
+    assert!(first[1].get("is_error").is_none());
+    assert_eq!(first[2]["is_error"], true, "{}", first[2]["content"]);
+    let msg = first[2]["content"].as_str().unwrap();
+    assert!(
+        msg.contains("too large") && msg.contains("view_range"),
+        "{msg}"
+    );
+    let total: usize = first
+        .iter()
+        .map(|b| b["content"].as_str().unwrap().chars().count())
+        .sum();
+    assert!(total <= 200_000, "{total}");
+    // 次の応答では数え直す
+    assert!(tool_results(&reqs[2], 4)[0].get("is_error").is_none());
+}
+
+#[tokio::test]
+async fn max_files_is_counted_per_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::with_limits(
+        vec![dir.path().to_path_buf()],
+        subagent::sandbox::WorkspaceLimits {
+            max_file_bytes: 1024 * 1024,
+            max_files: 2,
+        },
+    )
+    .unwrap();
+    let sb = Arc::new(Sandbox::new(ws, CommandPolicy::disabled()));
+    let make = |llm: Arc<ScriptedLlm>| {
+        CodeGenAgent::with_sandbox(CodeGenAgent::default_config(), sb.clone())
+            .with_llm(llm, settings())
+    };
+    let create = |p: &str| json!({"command": "create", "path": p, "file_text": "x"});
+    let llm = one_turn(vec![create("a1"), create("a2"), create("a1"), create("a3")]);
+    let r = make(llm.clone())
+        .call_typed(json!({"task": "t"}), ctx())
+        .await
+        .unwrap();
+    assert_eq!(paths(&r["files"]), ["a1", "a2"]);
+    let results = tool_results(&llm.requests()[1], 2);
+    // 同じファイルの書き直しは数えない。3 件目の新しいファイルで止まる
+    assert!(results[2].get("is_error").is_none());
+    assert_eq!(results[3]["is_error"], true);
+    assert!(!dir.path().join("a3").exists());
+    // 別の呼び出しは数え直す
+    let llm = one_turn(vec![create("b1"), create("b2")]);
+    let r = make(llm)
+        .call_typed(json!({"task": "t"}), ctx())
+        .await
+        .unwrap();
+    assert_eq!(paths(&r["files"]), ["b1", "b2"]);
+}
+
+#[tokio::test]
+async fn insert_at_the_end_of_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("e.txt"), "a\nb\n").unwrap();
+    std::fs::write(dir.path().join("n.txt"), "a\nb").unwrap();
+    let llm = one_turn(vec![
+        json!({"command": "insert", "path": "e.txt", "insert_line": 2, "insert_text": "c"}),
+        json!({"command": "insert", "path": "n.txt", "insert_line": 2, "insert_text": "c"}),
+    ]);
+    agent(dir.path(), llm)
+        .call_typed(json!({"task": "t"}), ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("e.txt")).unwrap(),
+        "a\nb\nc\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("n.txt")).unwrap(),
+        "a\nb\nc"
+    );
 }

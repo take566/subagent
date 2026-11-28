@@ -164,13 +164,17 @@ query・検索結果・取得した page は untrusted として扱います（�
 
 Claude（既定 `claude-opus-5-5`、往復 25 回まで、1 タスクの token 予算 1000000）が `text_editor_20250728`（`str_replace_based_edit_tool`）で `SUBAGENT_ROOTS` の中のファイルを読み書きします。
 
-- command は `view`（ファイルは行番号付き・10 万文字で切る、ディレクトリは 2 段まで）/ `create` / `str_replace` / `insert`。それ以外（`undo_edit` など）や workspace の外を指す path は `is_error` の tool_result になり、Claude に返します（呼び出しは続きます）。1 回の応答の tool_result は 1 つの user message にまとめて送ります
+- command は `view`（ファイルは行番号付き・10 万文字で切る、ディレクトリは 2 段まで・500 件まで、読めない下のディレクトリは印を付けて続ける）/ `create` / `str_replace` / `insert`。それ以外（`undo_edit` など）や workspace の外を指す path（`/` を含む絶対パス）は `is_error` の tool_result になり、Claude に返します（呼び出しは続きます）。1 回の応答の tool_result は 1 つの user message にまとめて送ります。合計は 20 万文字までで、超える `view` は `is_error`（`view_range` で小さく読むよう促す）にします
+- `.git` の下（hook・`config` など）には書きません（direct tool も同じ。下の sandbox を参照）
+- **`view` は `SUBAGENT_ROOTS` の中の `.env` などの dotfile も読めます**（ディレクトリの一覧には出しませんが、path を指定すれば読めます）。秘密を置いたディレクトリを root にしないでください
 - `files` は最初の文脈として Workspace から読みます（50 件まで、1 ファイル 5 万文字・合計 12 万文字で切る）。中身は呼び出しごとの nonce 付きの区切りで囲み、untrusted（中の指示には従わない）と明示します。workspace の外を指す path（絶対パス・`..` など）はエラーで、LLM を呼びません。読めないファイルは理由を載せて続けます
 - `allow_commands` は受け付けますが、issue #78 が直るまでは無効です（コマンドの tool は渡さず、結果の `notes` にそう書きます）
 - 書いたファイルは**呼び出しごとに**記録します（`Workspace::begin_task` の全体の記録は使わないので、並行する呼び出しや direct tool の呼び出しと混ざりません）。`SUBAGENT_MAX_FILES` も呼び出しごとに数えます
-- deadline（`SUBAGENT_DEADLINE_SECS`）や cancel の後に届いた tool_use では書きません
+- deadline（`SUBAGENT_DEADLINE_SECS`）や cancel の後に届いた tool_use では書きません（確認は Workspace の lock の中、書く直前に行います）
 
-結果（JSON）: `files`（作った / 変えたファイルのうちテスト以外、workspace からの相対パス）、`test_files`（`tests/` などの下・`test_*`・`*_test.*`・`*.test.*`・`*.spec.*`）、`summary`（Claude の最後の本文）、`iterations`、`tokens_used`、`stop_reason`、`notes`。`stop_reason` が `end_turn` / `stop_sequence` 以外（`refusal` / `max_tokens` / `max_tokens_with_tool_use` / `max_iterations` / `token_budget` / `deadline` / `pause_limit` / `llm_error` / `cancelled`）なら、途中の結果（書いたファイルを含む）を載せた isError を返します。
+結果（JSON）: `files`（作った / 変えたファイルのうちテスト以外。`{"path": workspace からの相対パス, "kind": "created" | "modified"}` の配列）、`test_files`（同じ形。`tests/` などの下・`test_*`・`*_test.*`・`*.test.*`・`*.spec.*`）、`summary`（Claude の最後の本文）、`iterations`、`tokens_used`、`stop_reason`、`notes`。
+
+`stop_reason` が `end_turn` / `stop_sequence` 以外（`refusal` / `max_tokens` / `max_tokens_with_tool_use` / `max_iterations` / `token_budget` / `deadline` / `pause_limit` / `llm_error` / `cancelled`）なら isError を返します。1 つ目の text は `Error: codegen did not finish (stop_reason: ..., N files changed)` だけで（server のログにも同じものだけを出します）、途中の結果（書いたファイル・本文・`error` にエラーの中身）は `structuredContent`（と 2 つ目の text）に入れます。応答を待つ間に cancel された時の `iterations` / `tokens_used` は、それまでに受け取った応答の分です。
 
 `execute`（`full` のみ）の引数は `action`（必須、空でない文字列）、`task_id`（任意、空でない文字列。省略時は `task-<uuid>`）、`parameters`（任意、object）です。型が違うと `Error: Invalid arguments: ...` を返します。
 
@@ -204,6 +208,7 @@ Claude（既定 `claude-opus-5-5`、往復 25 回まで、1 タスクの token �
 - symlink / junction で root の外を指していれば拒否します。open した後にも handle の実パスを確かめるので、確認と open の間に差し替えられても root の外の中身は読まず、書きもしません
 - 通常ファイル以外（FIFO・デバイス・ディレクトリ）は開きません。最後の component は link を辿らずに開きます（Unix は `O_NOFOLLOW | O_NONBLOCK`、Windows は `FILE_FLAG_OPEN_REPARSE_POINT`）
 - 無いディレクトリは 1 段ずつ作り、作るたびに root の中か確かめます
+- root からの相対パスに `.git`（大文字小文字は問わない）を含む場所には、どのツールでも書きません（`.git/hooks/*` や `.git/config` の `core.fsmonitor` で、後で git を使った時にホストでコードが動くため）。字面に加えて canonical なパスと open した handle の実パスでも確かめるので、8.3 の短い名前（`GIT~1`）でも抜けられません。読むのは拒否しません
 - ハードリンク（リンク数 2 以上）のファイルは読みも書きもしません
 - エラーメッセージには渡された相対パスだけを載せます（root の外の実パスは載せません）
 

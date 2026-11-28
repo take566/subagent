@@ -193,6 +193,17 @@ fn error_result(text: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(format!("Error: {}", text.into()))])
 }
 
+/// 途中で止まった typed tool: isError で、1 つ目の text は要約、途中の結果は structuredContent
+/// （と、それを読まない client 向けに 2 つ目の text）
+fn incomplete_result(message: &str, partial: Value) -> CallToolResult {
+    let mut r = CallToolResult::structured_error(partial.clone());
+    r.content = vec![
+        ContentBlock::text(format!("Error: {message}")),
+        ContentBlock::text(serde_json::to_string_pretty(&partial).unwrap_or_default()),
+    ];
+    r
+}
+
 pub struct McpServer {
     subagent: Arc<dyn Subagent>,
     logger: Logger,
@@ -434,11 +445,17 @@ impl McpServer {
                 serde_json::to_string_pretty(&v).unwrap_or_default(),
             )]),
             Err(e) => {
+                // Incomplete の Display は短い要約だけ（途中の結果はログに出さない）
                 self.logger.error(
                     &format!("Tool execution failed: {name}"),
                     Some(&json!({ "error": e.to_string() })),
                 );
-                error_result(e.to_string())
+                match e {
+                    crate::Error::Incomplete { message, partial } => {
+                        incomplete_result(&message, *partial)
+                    }
+                    e => error_result(e.to_string()),
+                }
             }
         }
     }

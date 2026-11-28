@@ -863,7 +863,6 @@ fn replay_backend_serves_typed_tools() {
         c.initialize();
         let args = match agent {
             "research" => json!({ "query": "rust" }),
-            "codegen" => json!({ "task": "x" }),
             "review" => json!({ "code": "// c\nfn a() {}" }),
             _ => json!({ "content": "x", "format": "txt" }),
         };

@@ -14,7 +14,7 @@ use crate::error::{Error, Result};
 use crate::llm::{
     AgentKind, AgentLlm, AgentLlmSettings, ConversationRunner, LlmClient, Message, RunStop, ToolDef,
 };
-use crate::sandbox::{Sandbox, Workspace, validate_relative};
+use crate::sandbox::{ChangeKind, FileChange, Sandbox, Workspace, validate_relative};
 use crate::tools::{BashTool, FileCreateTool, StrReplaceTool, js_display};
 use crate::types::{
     Backoff, BehaviorConfig, ErrorAction, ErrorHandlingStrategy, InterfaceConfig, JsonMap,
@@ -22,7 +22,7 @@ use crate::types::{
 };
 use crate::utils::{ErrorHandler, RetryManager};
 use async_trait::async_trait;
-use editor::{EditorTools, is_test_path, truncate};
+use editor::{CallObserver, EditorTools, is_test_path, truncate};
 use rmcp::model::Tool as McpTool;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -371,8 +371,10 @@ impl Subagent for CodeGenAgent {
     /// typed tool `codegen`: Claude に text editor tool（Workspace の中だけ）でコードを書かせる。
     ///
     /// 結果は `{files, test_files, summary, iterations, tokens_used, stop_reason, notes}`
-    /// （`files` / `test_files` はこの呼び出しで作った / 変えたファイルの相対 path）。
-    /// `end_turn` / `stop_sequence` 以外で止まったら、途中の結果を載せたエラー（isError）にする
+    /// （`files` / `test_files` はこの呼び出しで作った / 変えたファイルの `{path, kind}`、
+    /// kind は `created` / `modified`）。`end_turn` / `stop_sequence` 以外で止まったら
+    /// [`Error::Incomplete`]（message は stop_reason と件数だけ、途中の結果は `partial` に
+    /// `error` を足して載せる。MCP では isError の structuredContent）
     async fn call_typed(&self, args: Value, ctx: CallCtx) -> Result<Value> {
         self.llm.ensure_configured()?;
         let input = CodegenInput::parse(&args)?;
@@ -396,9 +398,10 @@ impl Subagent for CodeGenAgent {
             vec![ToolDef::text_editor()],
         );
         let editor = Arc::new(EditorTools::new(ws, ctx.deadline, ctx.cancel.clone()));
+        let observer = Arc::new(CallObserver::new(editor.clone(), ctx.progress.clone()));
         let runner = ConversationRunner::new(self.llm.client.clone(), template, editor.clone())
             .with_limits(settings.runner_limits(ctx.deadline))
-            .with_observer(Arc::new(ctx.progress.clone()));
+            .with_observer(observer.clone());
         let nonce = uuid::Uuid::new_v4().simple().to_string();
         let prompt = user_prompt(&input.task, &context, &nonce);
 
@@ -413,29 +416,49 @@ impl Subagent for CodeGenAgent {
             Some(o) if !cancelled => stop_name(&o.stop),
             _ => "cancelled".to_string(),
         };
-        let (test_files, files): (Vec<String>, Vec<String>) =
-            editor.changed().into_iter().partition(|p| is_test_path(p));
-        let result = json!({
-            "files": files,
-            "test_files": test_files,
+        // runner の結果が無い（応答を待つ間に cancel された）時は observer が数えた値
+        let (iterations, tokens) = match &outcome {
+            Some(o) => (o.iterations, o.usage.total()),
+            None => observer.seen(),
+        };
+        let changed = editor.changed();
+        let n_changed = changed.len();
+        let entry = |c: &FileChange| {
+            json!({
+                "path": c.path,
+                "kind": match c.kind {
+                    ChangeKind::Created => "created",
+                    ChangeKind::Modified => "modified",
+                },
+            })
+        };
+        let (test_files, files): (Vec<&FileChange>, Vec<&FileChange>) =
+            changed.iter().partition(|c| is_test_path(&c.path));
+        let mut result = json!({
+            "files": files.into_iter().map(entry).collect::<Vec<_>>(),
+            "test_files": test_files.into_iter().map(entry).collect::<Vec<_>>(),
             "summary": outcome.as_ref().map(|o| o.text.trim()).unwrap_or_default(),
-            "iterations": outcome.as_ref().map_or(0, |o| o.iterations),
-            "tokens_used": outcome.as_ref().map_or(0, |o| o.usage.total()),
+            "iterations": iterations,
+            "tokens_used": tokens,
             "stop_reason": stop,
             "notes": notes,
         });
         if matches!(stop.as_str(), "end_turn" | "stop_sequence") {
             return Ok(result);
         }
-        let why = match outcome.as_ref().and_then(|o| o.error.as_ref()) {
-            Some(e) if !cancelled => format!("{stop}: {e}"),
-            _ if cancelled => "the call was cancelled".to_string(),
-            _ if stop == "deadline" => "deadline exceeded (SUBAGENT_DEADLINE_SECS)".to_string(),
-            _ => stop.clone(),
+        // エラーの中身（API のメッセージなど）は途中の結果にだけ載せる
+        result["error"] = match outcome.as_ref().and_then(|o| o.error.as_ref()) {
+            Some(e) if !cancelled => Value::String(e.to_string()),
+            _ => Value::Null,
         };
-        Err(Error::other(format!(
-            "codegen did not finish ({why}). Partial result: {result}"
-        )))
+        // message はログにも出るので、stop_reason と件数だけにする（本文・path・エラーの中身は入れない）
+        let plural = if n_changed == 1 { "" } else { "s" };
+        Err(Error::Incomplete {
+            message: format!(
+                "codegen did not finish (stop_reason: {stop}, {n_changed} file{plural} changed)"
+            ),
+            partial: Box::new(result),
+        })
     }
 
     async fn execute(&self, task: Task) -> Result<TaskResult> {
