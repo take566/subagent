@@ -159,7 +159,84 @@
         ],
         "isError": true
       }
+    },
+    {
+      "call": {
+        "name": "execute",
+        "arguments": {
+          "task_id": "g-1b",
+          "parameters": {
+            "query": "x"
+          }
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: action must be a non-empty string"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "call": {
+        "name": "execute",
+        "arguments": {
+          "task_id": 7,
+          "action": "research",
+          "parameters": {}
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: task_id must be a non-empty string"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "call": {
+        "name": "execute",
+        "arguments": {
+          "task_id": "",
+          "action": "research"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: task_id must be a non-empty string"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "call": {
+        "name": "execute",
+        "arguments": {
+          "action": "research",
+          "parameters": [
+            1
+          ]
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Error: Invalid arguments: parameters must be an object"
+          }
+        ],
+        "isError": true
+      }
     }
   ],
-  "stdout_non_json_lines": 45
+  "stdout_non_json_lines": 49
 }

@@ -72,11 +72,11 @@
         "content": [
           {
             "type": "text",
-            "text": "{\n  \"taskId\": \"g-3\",\n  \"status\": \"completed\",\n  \"result\": {\n    \"issues\": \"<TS ran `npm run lint`; npm error lines were counted as lint errors (score 20). Rust: lint only when lint_command is given>\",\n    \"suggestions\": [],\n    \"score\": 20\n  },\n  \"confidence\": 0.9,\n  \"metrics\": {\n    \"duration_ms\": \"<DURATION>\",\n    \"tools_called\": 2\n  }\n}"
+            "text": "{\n  \"taskId\": \"g-3\",\n  \"status\": \"completed\",\n  \"result\": {\n    \"issues\": \"<TS ran `npm run lint`; npm error lines were counted as lint errors. Rust: lint only when lint_command is given>\",\n    \"suggestions\": [],\n    \"score\": 20\n  },\n  \"confidence\": 0.9,\n  \"metrics\": {\n    \"duration_ms\": \"<DURATION>\",\n    \"tools_called\": 2\n  }\n}"
           }
         ]
       }
     }
   ],
-  "stdout_non_json_lines": 54
+  "stdout_non_json_lines": 59
 }
