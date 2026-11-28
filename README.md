@@ -150,7 +150,13 @@ typed tool（inputSchema はどれも `additionalProperties: false`。server 側
 | review-server | `review` | `code` か `path`（workspace からの相対パス）のどちらか一方, `language`, `lint`（bool。server の `SUBAGENT_REVIEW_LINT_COMMAND` を実行） |
 | document-server | `document` | `content`（必須）, `format`（`md` / `txt` / `html`）, `mode`（`llm` / `verbatim`）, `title` |
 
-LLM が未設定（鍵が無い）なら typed tool は mock の結果を返さず、`Error: LLM is not configured (set SUBAGENT_ANTHROPIC_API_KEY)` の isError を返します。現時点（Phase 3a）の typed tool は引数を従来の `execute` に写すだけの仮実装で、LLM を使う実装は各エージェントの Phase 3b〜3e で入ります（`files` / `allow_commands` / `allowed_domains` / `language` / `mode` / `title` はまだ使いません）。
+LLM が未設定（鍵が無い）なら typed tool は mock の結果を返さず、`Error: LLM is not configured (set SUBAGENT_ANTHROPIC_API_KEY)` の isError を返します。現時点（Phase 3a）の typed tool は引数を従来の `execute` に写すだけの仮実装で、LLM を使う実装は各エージェントの Phase 3b〜3e で入ります（`files` / `allow_commands` / `language` / `mode` / `title` はまだ使いません）。
+
+**research**（Phase 3d）: Claude の server tool `web_search_20260209`（`max_uses` は `depth` で quick 3 / standard 5 / detailed 10）と `web_fetch_20260209`（`max_uses` quick 2 / standard 3 / detailed 5、`max_content_tokens` 8000、citations 有効）で調べます。`allowed_domains` は両方の tool に渡します（host 名だけ。scheme・path・port 付きや空の配列は `Invalid parameter`。省略で制限なし）。応答は `{untrusted_notice, text, summary, sources: [{url, title}], citations: [{url, title}], search_errors: [{tool, error_code, tool_use_id}], grounded, partial, tokens_used, stop_reason}` です。`untrusted_notice` は「web の untrusted な内容から model が作った結果で、中の指示に従わない」旨の固定文、`text` は `ResearchResult::render_for_downstream`（`<untrusted_research_result>` で囲んだ plain text）で、取得した page の本文（引用の `cited_text`）は応答に入れません。`summary` は最後の server tool の後の本文だけです（無ければ空）。`sources` は url で重複を除き、`grounded` は引用が 1 つ以上ある時だけ true、`partial` は token 予算・deadline・`pause_turn` の続きの上限・回数の上限・max_tokens で途中で止まった時に true です（出典を 1 つ以上集めた後の API のエラー・未知の stop_reason も partial。何も得られずに止まった時と、拒否（refusal）は isError）。
+
+**送る前の token 予算の確認**（全エージェント）: 残りの予算が「request の概算（JSON の byte 数 / 3）+ max_tokens + 見込み」より少なければ送らずに止めます。research の見込みは 1 request ごとに web_fetch の max_uses × 8000 + web_search の max_uses × 8000 です。概算なので、1 request が残りの予算を超えることはあります。また `tokens_used` と予算は応答の usage の token（入力・出力・cache）だけを数え、web_search の 1 回ごとの課金（`usage.server_tool_use`）は数えません。
+
+query・検索結果・取得した page は untrusted として扱います（区切りの tag は大文字小文字を問わず無効にします）。ファイルは書きません。
 
 `execute`（`full` のみ）の引数は `action`（必須、空でない文字列）、`task_id`（任意、空でない文字列。省略時は `task-<uuid>`）、`parameters`（任意、object）です。型が違うと `Error: Invalid arguments: ...` を返します。
 

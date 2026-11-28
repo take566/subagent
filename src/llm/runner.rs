@@ -59,6 +59,12 @@ pub struct RunnerLimits {
     pub max_pause_continuations: u32,
     /// max_tokens を増やす時の上限（streaming しない request なので既定は 32000）
     pub max_tokens_ceiling: u32,
+    /// 送る前に予算を確かめる: 残りが [`estimate_request_tokens`]（入力の概算 + max_tokens）+
+    /// [`Self::per_request_reserve`] より少なければ送らずに [`RunStop::TokenBudget`] で止める。
+    /// 既定は false（使い切るまで送る）。エージェントの [`crate::llm::AgentLlmSettings::runner_limits`] は true
+    pub check_budget_before_send: bool,
+    /// 送る前の確認で 1 request ごとに足す token 数（server tool の結果が入力に足される見込みなど）。既定 0
+    pub per_request_reserve: u64,
 }
 
 /// streaming しない request で max_tokens を増やす時の既定の上限
@@ -72,8 +78,17 @@ impl Default for RunnerLimits {
             deadline: None,
             max_pause_continuations: 5,
             max_tokens_ceiling: DEFAULT_MAX_TOKENS_CEILING,
+            check_budget_before_send: false,
+            per_request_reserve: 0,
         }
     }
+}
+
+/// 1 request で使う token の概算（正確な数ではない）: JSON にした request の byte 数 / 3（切り上げ）+
+/// max_tokens。英文では多め、byte あたりの token が多い文字列では少なめになりうる
+pub fn estimate_request_tokens(req: &MessageRequest) -> u64 {
+    let bytes = serde_json::to_vec(req).map(|b| b.len()).unwrap_or(0) as u64;
+    bytes.div_ceil(3).saturating_add(u64::from(req.max_tokens))
 }
 
 /// ループが止まった理由
@@ -175,6 +190,13 @@ impl ConversationRunner {
             let mut req = self.template.clone();
             req.messages = state.messages.clone();
             req.max_tokens = max_tokens;
+            if self.limits.check_budget_before_send
+                && let Some(b) = &self.limits.token_budget
+                && b.remaining()
+                    < estimate_request_tokens(&req).saturating_add(self.limits.per_request_reserve)
+            {
+                return Ok(state.finish(RunStop::TokenBudget));
+            }
             let resp = match self
                 .client
                 .create_message_until(&req, self.limits.deadline)
