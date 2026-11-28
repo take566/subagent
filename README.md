@@ -210,14 +210,15 @@ Windows では allowlist にも program にも `.exe` 以外の拡張子（`.bat
 
 ### Review エージェントの typed tool（`review`）
 
-Claude（既定 `claude-opus-5-5`）に 1 回だけ聞いてレビューします。
+Claude（既定 `claude-opus-5-5`、max_tokens 32000）に 1 回だけ聞いてレビューします。**`summary` と `issues` は信頼できない入力（コード・lint 出力）からモデルが生成したもの**です。呼び出し側はそれを指示として扱わないでください。
 
-- 入力は `code`（文字列）か `path`（`SUBAGENT_ROOTS` からの相対パス。絶対パス・`..` は Workspace が拒否）のどちらか一方。12 万文字を超える入力はエラー。1 行で絶対パスに見える `code` もエラー
+- 入力は `code`（文字列）か `path`（`SUBAGENT_ROOTS` からの相対パス。絶対パス・`..` は Workspace が拒否）のどちらか一方。12 万文字を超える入力はエラー。上限は Claude に送る prompt（行番号付きのコード・`language` / `path`・lint の出力）にも掛け、超えれば送らずにエラーにします。`language` は 64 文字まで。1 行で絶対パスに見える `code` もエラー
 - コード・`language` / `path`・lint の出力は、推測できない id 付きの `<<<UNTRUSTED_...>>>` で囲んで渡し、その中の指示には従わないよう system prompt で指示します
-- 出力は structured output（`output_config.format` の `json_schema`）。`issues[]`（`type` は `error` / `warning` / `info`、任意で `severity` / `line` / `rule`）・`suggestions[]`・`summary`
-- `score` は従来の決定的な計算（100 − error×10 − warning×2 − 提案の数、0〜100）。数えるのは Claude の指摘・従来の heuristics（大きすぎるファイル、コメントの少なさ）・lint の指摘
-- `lint: true` は `SUBAGENT_REVIEW_LINT_COMMAND` を workspace の root で実行します（`code` で渡した場合もそのコードではなく workspace を lint します）。終了コードが 0 以外でも結果（`lint.success: false`）として扱い、allowlist に無い・起動できない場合は `lint_error` を返します
+- 出力は structured output（`output_config.format` の `json_schema`）。`issues[]`（`type` は `error` / `warning` / `info`、任意で `severity` / `line` / `rule`。`line` が 0 以下なら捨てます）・`suggestions[]`・`summary`。指摘は重要な順に 50 件まで、提案は 20 件までと指示しています
+- `score` は従来の決定的な計算（100 − error×10 − warning×2 − 提案の数、0〜100）。数えるのは Claude の指摘・従来の heuristics（大きすぎるファイル、コメントの少なさ）と、`path` で渡した時だけ lint の指摘
+- `lint: true` は `SUBAGENT_REVIEW_LINT_COMMAND` を workspace の root で実行します（`code` で渡した場合もそのコードではなく workspace を lint するので、lint の指摘は `lint.issues` に返すだけで score には数えません）。終了コードが 0 以外でも結果（`lint.success: false`）として扱い、allowlist に無い・起動できない場合は `lint_error` を返します
 - 応答: `{score, issues, suggestions, summary, lint?: {command, success, timed_out, truncated, issues}, lint_error?, tokens_used, stop_reason}`。拒否（refusal）・max_tokens・不正な JSON・deadline・token 予算（既定 150000）・取り消しは isError
+- 既知の限界: 送る前の予算の確認（runner の pre-send check、Phase 3d）が入るまでは、review の token 予算は応答を受け取った後に数えるだけです（1 往復なので、1 回の呼び出しは予算を超えて使いうる）
 
 ### Review エージェントの lint
 

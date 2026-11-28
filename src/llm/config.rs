@@ -131,9 +131,9 @@ impl TokenBudget {
         Self::new(1_000_000)
     }
 
-    /// review の既定（100k）
+    /// review の既定（150k。入力は 12 万文字まで）
     pub fn review() -> Self {
-        Self::new(100_000)
+        Self::new(150_000)
     }
 
     /// document の既定（100k）

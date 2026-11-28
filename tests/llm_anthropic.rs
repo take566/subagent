@@ -591,7 +591,7 @@ fn config_from_lookup_prefers_subagent_key_and_reads_daily_cap() {
 fn task_budget_defaults_and_charging() {
     assert_eq!(TokenBudget::research().limit(), 300_000);
     assert_eq!(TokenBudget::codegen().limit(), 1_000_000);
-    assert_eq!(TokenBudget::review().limit(), 100_000);
+    assert_eq!(TokenBudget::review().limit(), 150_000);
     assert_eq!(TokenBudget::document().limit(), 100_000);
 
     let b = TokenBudget::new(100);

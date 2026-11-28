@@ -222,24 +222,126 @@ async fn past_deadline_sends_nothing() {
     assert!(llm.requests().is_empty());
 }
 
+/// 行番号を足した後の prompt で上限を見る（空行だらけのコードは行番号で膨らむ）
 #[tokio::test]
-async fn budget_stop_is_an_error() {
+async fn oversized_final_prompt_is_rejected_before_sending() {
     let dir = tempfile::tempdir().unwrap();
-    // pause_turn の後、使った 20 token が予算 1 を超えるので 2 回目は送らない
-    let llm = scripted(vec![
-        Ok(ScriptedLlm::response(StopReason::PauseTurn, vec![])),
-        Ok(ScriptedLlm::text_response(&review_json())),
-    ]);
-    let mut settings = AgentLlmSettings::defaults(AgentKind::Review);
-    settings.token_budget = 1;
-    let agent = ReviewAgent::with_sandbox(ReviewAgent::default_config(), sandbox(dir.path(), &[]))
-        .with_llm(llm.clone(), settings);
+    let llm = scripted(vec![]);
+    let agent = agent_in(dir.path(), &[], llm.clone());
+    // 生のコードは 2 万文字だが、行番号付きでは 12 万文字を超える
+    let code = format!("// c{}", "\n".repeat(20_000));
     let e = agent
-        .call_typed(json!({ "code": CODE }), ctx())
+        .call_typed(json!({ "code": code }), ctx())
         .await
         .unwrap_err();
-    assert!(e.to_string().contains("budget"), "{e}");
+    assert!(e.to_string().contains("120000"), "{e}");
+    assert!(llm.requests().is_empty());
+}
+
+#[tokio::test]
+async fn language_is_capped_at_64_chars() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = scripted(vec![Ok(ScriptedLlm::text_response(&review_json()))]);
+    let agent = agent_in(dir.path(), &[], llm.clone());
+    agent
+        .call_typed(json!({ "code": CODE, "language": "あ".repeat(64) }), ctx())
+        .await
+        .unwrap();
+    let e = agent
+        .call_typed(json!({ "code": CODE, "language": "x".repeat(65) }), ctx())
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("language"), "{e}");
     assert_eq!(llm.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn max_tokens_is_32000_and_prompt_limits_issue_count() {
+    assert_eq!(
+        AgentLlmSettings::defaults(AgentKind::Review).max_tokens,
+        32_000
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let llm = scripted(vec![Ok(ScriptedLlm::text_response(&review_json()))]);
+    agent_in(dir.path(), &[], llm.clone())
+        .call_typed(json!({ "code": CODE }), ctx())
+        .await
+        .unwrap();
+    let req = &llm.requests()[0];
+    assert_eq!(req["max_tokens"], 32_000);
+    let system = req["system"].as_str().unwrap();
+    assert!(system.contains("at most 50"), "{system}");
+    assert!(system.contains("at most 20"), "{system}");
+}
+
+#[tokio::test]
+async fn effort_and_format_are_both_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = scripted(vec![Ok(ScriptedLlm::text_response(&review_json()))]);
+    let mut settings = AgentLlmSettings::defaults(AgentKind::Review);
+    settings.effort = Some(subagent::llm::Effort::High);
+    ReviewAgent::with_sandbox(ReviewAgent::default_config(), sandbox(dir.path(), &[]))
+        .with_llm(llm.clone(), settings)
+        .call_typed(json!({ "code": CODE }), ctx())
+        .await
+        .unwrap();
+    let oc = &llm.requests()[0]["output_config"];
+    assert_eq!(oc["format"]["type"], "json_schema", "{oc}");
+    assert_eq!(oc["effort"], "high", "{oc}");
+}
+
+#[tokio::test]
+async fn non_positive_line_is_dropped_not_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = scripted(vec![Ok(ScriptedLlm::text_response(
+        &json!({
+            "issues": [
+                { "type": "warning", "line": -1, "message": "a" },
+                { "type": "warning", "line": 0, "message": "b" },
+                { "type": "warning", "line": 2, "message": "c" }
+            ],
+            "suggestions": [],
+            "summary": "s"
+        })
+        .to_string(),
+    ))]);
+    let v = agent_in(dir.path(), &[], llm)
+        .call_typed(json!({ "code": CODE }), ctx())
+        .await
+        .unwrap();
+    assert!(v["issues"][0].get("line").is_none(), "{v}");
+    assert!(v["issues"][1].get("line").is_none(), "{v}");
+    assert_eq!(v["issues"][2]["line"], 2);
+}
+
+#[test]
+fn review_budget_has_one_source() {
+    assert_eq!(subagent::llm::TokenBudget::review().limit(), 150_000);
+    assert_eq!(
+        AgentLlmSettings::defaults(AgentKind::Review).token_budget,
+        subagent::llm::TokenBudget::review().limit()
+    );
+}
+
+/// lint は workspace の root で走るので、`code` のレビューでは score に数えない（`path` では数える）
+#[tokio::test]
+async fn lint_issues_score_only_for_path_input() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), CODE).unwrap();
+    for (args, expect) in [
+        (json!({ "code": CODE, "lint": true }), true),
+        (json!({ "path": "a.rs", "lint": true }), false),
+    ] {
+        let llm = scripted(vec![Ok(ScriptedLlm::text_response(&review_json()))]);
+        let agent = agent_in(dir.path(), &["rustc"], llm)
+            .with_lint_command(Some("rustc --no-such-flag-xyz".into()));
+        let v = agent.call_typed(args.clone(), ctx()).await.unwrap();
+        assert!(
+            !v["lint"]["issues"].as_array().unwrap().is_empty(),
+            "lint must report something: {v}"
+        );
+        assert_eq!(v["score"] == 87, expect, "{args}: {v}");
+    }
 }
 
 #[tokio::test]
@@ -412,12 +514,12 @@ async fn input_cap_is_120k_chars() {
     let llm = scripted(vec![Ok(ScriptedLlm::text_response(&review_json()))]);
     let agent = agent_in(dir.path(), &[], llm.clone());
     // 多バイト文字でも「文字」で数える
-    let at_cap = format!("//{}", "あ".repeat(120_000 - 2));
+    let fits = format!("//{}", "あ".repeat(110_000));
     agent
-        .call_typed(json!({ "code": at_cap }), ctx())
+        .call_typed(json!({ "code": fits }), ctx())
         .await
         .unwrap();
-    let over = format!("{at_cap}x");
+    let over = format!("//{}", "あ".repeat(120_000 - 1));
     let e = agent
         .call_typed(json!({ "code": over }), ctx())
         .await

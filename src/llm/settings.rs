@@ -71,13 +71,17 @@ impl AgentLlmSettings {
         let (token_budget, max_iterations, cache) = match kind {
             AgentKind::Research => (TokenBudget::research().limit(), 10, true),
             AgentKind::CodeGen => (TokenBudget::codegen().limit(), 25, true),
-            // review は 1 往復（入力は 120k 文字まで）なので 150k（Phase 3c）
-            AgentKind::Review => (150_000, 3, false),
+            AgentKind::Review => (TokenBudget::review().limit(), 3, false),
             AgentKind::Document => (TokenBudget::document().limit(), 3, false),
+        };
+        // review は 1 回の応答に指摘を全部入れるので広めに取る（runner の上限 32000 と同じ）
+        let max_tokens = match kind {
+            AgentKind::Review => 32_000,
+            _ => 16_000,
         };
         Self {
             model: DEFAULT_MODEL.to_string(),
-            max_tokens: 16_000,
+            max_tokens,
             effort: None,
             token_budget,
             max_iterations,
