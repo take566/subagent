@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Phase 3b（document の typed tool）
+- `document` の typed tool は LLM（Claude）が文書を書く（`mode: "llm"`、既定）。`mode: "verbatim"` は LLM 無しで従来どおり保存する。出力は workspace の `docs/generated-<timestamp>-<8 桁の hex>.<ext>`（並行呼び出しでも上書きしない）。結果は `{path, format, mode, title, bytes, tokens_used, stop_reason}`。`content` は llm で 60000 文字まで
+- **挙動の変更**: verbatim の `html` は `content` の `&` `<` `>` を escape してから `<pre>` で包む（3a の仮実装・`execute` は escape しない）
+- 書き込みが IO エラーで失敗したら作りかけのファイルを消す
+
 ### Phase 3a（エージェントを LLM につなぐ土台）
 - MCP の `SUBAGENT_MCP_MODE`: 既定の `hermes` は各 server の typed tool（`research` / `codegen` / `review` / `document`）だけを公開し、direct tool と `execute` の呼び出しを拒否する。`full` 以外の値は `hermes`（fail closed）。**既定の挙動の変更**: 従来のツールを使うには `SUBAGENT_MCP_MODE=full`
 - typed tool（inputSchema は `additionalProperties: false` と `required`。server 側でも検証して `Error: Invalid arguments: ...`）。今は引数を既存の `execute` に写す仮実装で、LLM が未設定なら mock の結果を返さずに `LLM is not configured` の isError

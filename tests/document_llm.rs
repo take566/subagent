@@ -199,6 +199,32 @@ async fn extension_follows_format_and_system_prompt_names_it() {
     }
 }
 
+/// html の system prompt は script・inline の event handler・外部の resource を禁じる
+#[tokio::test]
+async fn html_system_prompt_forbids_scripts_handlers_and_external_resources() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = Arc::new(ScriptedLlm::new(vec![ok("<!doctype html><p>x</p>")]));
+    agent(dir.path(), llm.clone())
+        .call_typed(json!({ "content": "c", "format": "html" }), ctx())
+        .await
+        .unwrap();
+    let system = llm.requests()[0]["system"].as_str().unwrap().to_string();
+    for needle in [
+        "<script>",
+        "event handler",
+        "onclick",
+        "external",
+        "<img",
+        "<link",
+        "<iframe",
+        "<form",
+        "fetch",
+        "URL",
+    ] {
+        assert!(system.contains(needle), "{needle}: {system}");
+    }
+}
+
 /// 全体が 1 つのコードフェンスに包まれた応答は中身だけを保存する
 #[tokio::test]
 async fn a_single_wrapping_code_fence_is_removed() {
@@ -225,14 +251,15 @@ async fn not_configured_llm_is_an_error_and_writes_nothing() {
     assert!(written(dir.path()).is_empty());
 }
 
-/// verbatim は LLM 無しで動き、従来の書き方（html は <pre> 包み）で保存する
+/// verbatim は LLM 無しで動き、従来の書き方（html は <pre> 包み）で保存する。
+/// html の content は escape する（`<script>` などをそのまま埋め込まない）
 #[tokio::test]
-async fn verbatim_works_without_an_llm_and_keeps_the_old_formatting() {
+async fn verbatim_works_without_an_llm_and_escapes_html() {
     let dir = tempfile::tempdir().unwrap();
     let a = DocumentAgent::with_options(DocumentAgent::default_config(), Some(dir.path().into()));
     let v = a
         .call_typed(
-            json!({ "content": "a<b", "format": "html", "mode": "verbatim", "title": "T" }),
+            json!({ "content": "a<b>&c<script>x</script>", "format": "html", "mode": "verbatim", "title": "T" }),
             ctx(),
         )
         .await
@@ -240,7 +267,10 @@ async fn verbatim_works_without_an_llm_and_keeps_the_old_formatting() {
     let files = written(dir.path());
     assert_eq!(files.len(), 1);
     assert!(files[0].0.ends_with(".html"));
-    assert_eq!(files[0].1, "<html><body><pre>a<b</pre></body></html>");
+    assert_eq!(
+        files[0].1,
+        "<html><body><pre>a&lt;b&gt;&amp;c&lt;script&gt;x&lt;/script&gt;</pre></body></html>"
+    );
     assert_eq!(v["mode"], "verbatim");
     assert_eq!(v["format"], "html");
     assert_eq!(v["title"], "T");
@@ -534,4 +564,99 @@ async fn progress_is_reported_per_iteration() {
         .unwrap();
     let got = rec.0.lock().unwrap().clone();
     assert!(got.iter().any(|m| m == "iteration 1"), "{got:?}");
+}
+
+/// 並行に呼んでも上書きしない（multi_thread で N 回 -> N ファイル・N 個の別の path）
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_calls_never_overwrite_each_other() {
+    const N: usize = 64;
+    let dir = tempfile::tempdir().unwrap();
+    let a = Arc::new(DocumentAgent::with_options(
+        DocumentAgent::default_config(),
+        Some(dir.path().into()),
+    ));
+    let tasks: Vec<_> = (0..N)
+        .map(|i| {
+            let a = a.clone();
+            tokio::spawn(async move {
+                a.call_typed(
+                    json!({ "content": format!("doc {i}"), "mode": "verbatim" }),
+                    ctx(),
+                )
+                .await
+            })
+        })
+        .collect();
+    let mut paths = std::collections::BTreeSet::new();
+    for t in tasks {
+        let v = t.await.unwrap().unwrap();
+        paths.insert(v["path"].as_str().unwrap().to_string());
+    }
+    assert_eq!(paths.len(), N, "distinct paths");
+    let files = written(dir.path());
+    assert_eq!(files.len(), N, "files");
+    let mut bodies: Vec<_> = files.into_iter().map(|(_, b)| b).collect();
+    bodies.sort();
+    bodies.dedup();
+    assert_eq!(bodies.len(), N, "every document kept its own content");
+    // 名前は generated-<ts>-<8 桁の hex>.<ext>
+    let re = regex::Regex::new(
+        r"^docs/generated-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z-[0-9a-f]{8}(-\d+)?\.md$",
+    )
+    .unwrap();
+    assert!(paths.iter().all(|p| re.is_match(p)), "{paths:?}");
+}
+
+/// 最後の往復の進捗で取り消されたら（書く直前の確認で）書かない
+#[tokio::test]
+async fn cancel_fired_just_before_the_write_writes_nothing() {
+    struct CancelOnIteration(CancellationToken);
+    #[async_trait]
+    impl ProgressNotifier for CancelOnIteration {
+        async fn notify(&self, _: f64, _: Option<f64>, message: Option<String>) {
+            if message.as_deref() == Some("iteration 1") {
+                self.0.cancel();
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = ctx();
+    c.progress = ProgressSink::new(Arc::new(CancelOnIteration(c.cancel.clone())));
+    let llm = Arc::new(ScriptedLlm::new(vec![ok("doc")]));
+    let e = agent(dir.path(), llm.clone())
+        .call_typed(json!({ "content": "c" }), c)
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("nothing was written"), "{e}");
+    assert_eq!(llm.requests().len(), 1);
+    assert!(written(dir.path()).is_empty());
+}
+
+#[tokio::test]
+async fn verbatim_with_a_cancelled_token_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = DocumentAgent::with_options(DocumentAgent::default_config(), Some(dir.path().into()));
+    let c = ctx();
+    c.cancel.cancel();
+    let e = a
+        .call_typed(json!({ "content": "c", "mode": "verbatim" }), c)
+        .await
+        .unwrap_err();
+    assert!(e.to_string().to_lowercase().contains("cancel"), "{e}");
+    assert!(written(dir.path()).is_empty());
+}
+
+#[tokio::test]
+async fn verbatim_after_the_deadline_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = DocumentAgent::with_options(DocumentAgent::default_config(), Some(dir.path().into()));
+    let e = a
+        .call_typed(
+            json!({ "content": "c", "mode": "verbatim" }),
+            CallCtx::with_deadline(Instant::now()),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.to_string().to_lowercase().contains("deadline"), "{e}");
+    assert!(written(dir.path()).is_empty());
 }

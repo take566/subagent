@@ -32,6 +32,8 @@ pub struct DocumentAgent {
     llm: AgentLlm,
     /// typed tool の出力先（`file_create` と同じもの）。[`Self::with_tools`] では None
     sandbox: Option<Arc<Sandbox>>,
+    /// typed tool の名前選びと書き込みを直列にする（[`Self::commit`]）
+    write_lock: std::sync::Mutex<()>,
 }
 
 impl DocumentAgent {
@@ -162,6 +164,7 @@ impl DocumentAgent {
             error_handler,
             llm: AgentLlm::unconfigured(AgentKind::Document),
             sandbox: None,
+            write_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -253,9 +256,13 @@ impl DocumentAgent {
         }))
     }
 
-    /// typed tool（`mode: "verbatim"`）: LLM を使わず、従来の `execute` と同じ書き方で保存する
+    /// typed tool（`mode: "verbatim"`）: LLM を使わず、従来の `execute` と同じ書き方で保存する。
+    /// html は content の `&` `<` `>` を escape してから `<pre>` で包む（`execute` は従来どおり escape しない）
     fn call_verbatim(&self, req: &TypedRequest, ctx: &CallCtx) -> Result<Value> {
-        let content = Self::format_content(&req.content, req.format.legacy_name());
+        let content = match req.format {
+            DocFormat::Html => Self::format_content(&escape_html(&req.content), "html"),
+            f => Self::format_content(&req.content, f.legacy_name()),
+        };
         let (path, bytes) = self.commit(ctx, req.format, &content)?;
         Ok(json!({
             "path": path,
@@ -275,11 +282,14 @@ impl DocumentAgent {
         }
     }
 
-    /// `docs/generated-<ts>.<ext>` に書き、(相対 path, byte 数) を返す。
+    /// `docs/generated-<ts>-<8 桁の hex>.<ext>` に書き、(相対 path, byte 数) を返す。
     ///
-    /// deadline / cancel を確かめてから、await を挟まずに書く。server は呼び出しの future を
-    /// await の所でしか捨てないので、書いた後に「deadline exceeded」が返ることも、
-    /// 「deadline exceeded」を返した後に書くことも無い。同名のファイルがあれば `-1`, `-2`, ... を付ける
+    /// - deadline / cancel を確かめてから、await を挟まずに書く。server は呼び出しの future を
+    ///   await の所でしか捨てないので、書いた後に「deadline exceeded」が返ることも、
+    ///   「deadline exceeded」を返した後に書くことも無い
+    /// - 名前を選んでから書き終えるまで `write_lock` を持つ（同じ agent の並行呼び出しで上書きしない）。
+    ///   乱数の suffix は同じ root を使う別 process 向け。それでも同名があれば `-1`, `-2`, ... を付ける
+    /// - IO エラーで書けなかった時は、作りかけのファイルを消す（[`remove_partial`]）
     fn commit(&self, ctx: &CallCtx, format: DocFormat, content: &str) -> Result<(String, usize)> {
         let ws = self.workspace()?;
         if ctx.cancel.is_cancelled() {
@@ -289,17 +299,22 @@ impl DocumentAgent {
             return Err(deadline_exceeded());
         }
         let ts = now_iso().replace([':', '.'], "-");
-        let ext = format.as_str();
-        let rel = (0..1000)
-            .map(|n| match n {
-                0 => format!("docs/generated-{ts}.{ext}"),
-                n => format!("docs/generated-{ts}-{n}.{ext}"),
-            })
-            .find(|rel| ws.resolve(rel).is_ok_and(|p| !p.exists()))
-            .ok_or_else(|| Error::other("could not choose a free docs/generated-* file name"))?;
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..8];
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rel = free_name(
+            &ws,
+            &format!("docs/generated-{ts}-{suffix}"),
+            format.as_str(),
+        )?;
         // 1 回の呼び出しで 1 ファイル（件数の上限は呼び出しごとに数える）
         ws.begin_task();
-        ws.create(&rel, content)?;
+        if let Err(e) = ws.create(&rel, content) {
+            remove_partial(&ws, &rel, &e);
+            return Err(e);
+        }
         Ok((rel, content.len()))
     }
 
@@ -447,8 +462,12 @@ impl DocFormat {
             DocFormat::Md => "Markdown (GitHub-flavoured; start with a `#` heading)",
             DocFormat::Txt => "plain text (no Markdown or HTML markup)",
             DocFormat::Html => {
-                "HTML: one complete, self-contained HTML5 document (<!doctype html> ... </html>) \
-                 with no external scripts"
+                "HTML: one complete, self-contained, static HTML5 document \
+                 (<!doctype html> ... </html>) with inline CSS only. Do not use <script> \
+                 elements, inline event handler attributes (onclick, onload, onerror or any \
+                 other on* attribute) or javascript: URLs. Do not reference any external \
+                 resource: no <img>, <link>, <iframe>, <object>, <embed>, <form>, CSS url() \
+                 or @import, and no URL that a browser would fetch"
             }
         }
     }
@@ -536,6 +555,44 @@ fn cancelled() -> Error {
 
 fn deadline_exceeded() -> Error {
     Error::other("deadline exceeded while writing the document; nothing was written")
+}
+
+/// `<stem>.<ext>` が無ければそれ、あれば `<stem>-1.<ext>`, `<stem>-2.<ext>`, ... の最初の空き
+fn free_name(ws: &Workspace, stem: &str, ext: &str) -> Result<String> {
+    (0..1000)
+        .map(|n| match n {
+            0 => format!("{stem}.{ext}"),
+            n => format!("{stem}-{n}.{ext}"),
+        })
+        .find(|rel| ws.resolve(rel).is_ok_and(|p| !p.exists()))
+        .ok_or_else(|| Error::other("could not choose a free docs/generated-* file name"))
+}
+
+/// IO エラーで書けなかった時、作りかけのファイル（`rel` は直前に空きを確かめた名前）を消す。
+/// sandbox の拒否（root の外を指していた、など）では何も消さない
+fn remove_partial(ws: &Workspace, rel: &str, err: &Error) {
+    if !matches!(err, Error::Io(_) | Error::IoPath { .. }) {
+        return;
+    }
+    if let Ok(path) = ws.resolve(rel)
+        && path.is_file()
+    {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// `&` `<` `>` を文字参照にする（`<pre>` の中に置く本文用）
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn system_prompt(format: DocFormat) -> String {
@@ -628,6 +685,53 @@ mod tests {
         // 言語付きのフェンス（コードそのもの）は外さない
         let code = "```rust\nfn a() {}\n```";
         assert_eq!(strip_wrapping_fence(code), code);
+    }
+
+    fn workspace() -> (tempfile::TempDir, Workspace) {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(vec![dir.path().to_path_buf()]).unwrap();
+        (dir, ws)
+    }
+
+    /// 選んだ名前が既にあれば -1, -2, ... を付ける（上書きしない）
+    #[test]
+    fn free_name_skips_existing_files() {
+        let (dir, ws) = workspace();
+        let stem = "docs/generated-2026-11-28T00-00-00-000Z-abcd1234";
+        assert_eq!(free_name(&ws, stem, "md").unwrap(), format!("{stem}.md"));
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join(format!("{stem}.md")), "a").unwrap();
+        std::fs::write(dir.path().join(format!("{stem}-1.md")), "b").unwrap();
+        assert_eq!(free_name(&ws, stem, "md").unwrap(), format!("{stem}-2.md"));
+        // 拡張子が違えば別の名前
+        assert_eq!(free_name(&ws, stem, "txt").unwrap(), format!("{stem}.txt"));
+    }
+
+    /// IO エラーの後は作りかけのファイルを消し、sandbox の拒否では消さない
+    #[test]
+    fn remove_partial_only_after_io_errors() {
+        let (dir, ws) = workspace();
+        let path = dir.path().join("partial.md");
+        std::fs::write(&path, "half").unwrap();
+        remove_partial(&ws, "partial.md", &Error::Sandbox("denied".into()));
+        assert!(path.exists());
+        remove_partial(
+            &ws,
+            "partial.md",
+            &Error::io_at("partial.md", std::io::Error::other("disk full")),
+        );
+        assert!(!path.exists());
+        // 無いファイルや不正な path でも panic しない
+        remove_partial(
+            &ws,
+            "../x.md",
+            &Error::Io(std::io::Error::other("disk full")),
+        );
+    }
+
+    #[test]
+    fn html_escaping() {
+        assert_eq!(escape_html("a<b>&\"c'"), "a&lt;b&gt;&amp;\"c'");
     }
 
     #[test]

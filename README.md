@@ -214,10 +214,13 @@ Windows では allowlist にも program にも `.exe` 以外の拡張子（`.bat
 
 ### Document Agent の typed tool（`document`）
 
-- `mode: "llm"`（既定）: Claude が `content`（と `title`）から文書を 1 往復で書きます（tool なし、prompt cache なし、1 タスクの予算は既定 100000 token）。`content` と `title` は呼び出しごとの id 付きの untrusted ブロックで囲み、中の指示には従わないよう system prompt で伝えます。応答全体を包むコードフェンスは 1 つだけ外します。`content` は **60000 文字まで**（超えたら切り詰めずにエラー）、`title` は 300 文字までです。LLM が未設定なら `LLM is not configured` のエラーです
-- `mode: "verbatim"`: LLM を使わず（鍵が無くても動きます）、`content` を従来の `execute` と同じ書き方で保存します（`html` は `<html><body><pre>...</pre></body></html>` で包む）
-- 出力先は workspace（`SUBAGENT_ROOTS`）の `docs/generated-<timestamp>.<ext>`（`md` → `.md`、`txt` → `.txt`、`html` → `.html`）。同名があれば `-1`, `-2`, ... を付け、上書きしません
-- 拒否（refusal）・`max_tokens` で切れた・予算切れ・deadline・取り消し・LLM のエラーではファイルを書かずに isError を返します。deadline と取り消しは書く直前にも確かめます（「deadline exceeded」を返した後にファイルができることはありません）
+- `mode: "llm"`（既定）: Claude が `content`（と `title`）から文書を 1 往復で書きます（tool なし、prompt cache なし）。`content` と `title` は呼び出しごとの id 付きの untrusted ブロックで囲み、中の指示には従わないよう system prompt で伝えます。応答全体を包むコードフェンスは 1 つだけ外します。LLM が未設定なら `LLM is not configured` のエラーです
+- 入力の上限: `content` は **60000 文字まで**（`mode: "llm"` のとき。超えたら送らず、切り詰めずにエラー）、`title` は 300 文字までです
+- token 予算（既定 100000、`SUBAGENT_DOCUMENT_TOKEN_BUDGET`）: 1 往復で終わるので、今は応答を受け取った後にしか数えません（1 回の呼び出しが予算を超えることがあります）。runner の送信前の予算確認（Phase 3d で全エージェントに入る予定）が入ると、送る前に予算を確かめます
+- `format: "html"`（llm）: system prompt で、静的な HTML（inline CSS のみ）を求め、`<script>`・inline の event handler（`onclick` など）・`javascript:` URL・外部の resource（`<img>` / `<link>` / `<iframe>` / `<form>` / CSS の `url()` など、ブラウザが取りに行く URL）を禁じます。出力そのものは検査・除去しません
+- `mode: "verbatim"`: LLM を使わず（鍵が無くても動きます）、`content` を従来の `execute` と同じ書き方で保存します。`html` は `content` の `&` `<` `>` を escape してから `<html><body><pre>...</pre></body></html>` で包みます（`execute` は従来どおり escape しません）
+- 出力先は workspace（`SUBAGENT_ROOTS`）の `docs/generated-<timestamp>-<8 桁の hex>.<ext>`（`md` → `.md`、`txt` → `.txt`、`html` → `.html`）。名前選びと書き込みは agent の中で直列にし、乱数の suffix で同じ root を使う別 process とも重なりにくくしています。それでも同名があれば `-1`, `-2`, ... を付け、上書きしません
+- 拒否（refusal）・`max_tokens` で切れた・予算切れ・deadline・取り消し・LLM のエラーではファイルを書かずに isError を返します。deadline と取り消しは書く直前にも確かめます（「deadline exceeded」を返した後にファイルができることはありません）。書き込みが IO エラーで失敗した時は、作りかけのファイルを消してからエラーを返します（消せなかった時は残ることがあります）
 - 結果: `{"path": "docs/generated-....md", "format": "md", "mode": "llm", "title": "..." | null, "bytes": 123, "tokens_used": 456, "stop_reason": "end_turn"}`（`path` は workspace からの相対パス、`bytes` は書いた byte 数。verbatim は `tokens_used: 0`、`stop_reason: null`）
 
 ### Document Agent の Notion 連携
