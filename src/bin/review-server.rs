@@ -1,9 +1,15 @@
 //! Review Agent MCP Server
+//!
+//! 環境変数 `AGENT_ID` / `MAX_CONCURRENT` は [`mcp::run_stdio`] が反映する。
 
-use std::sync::Arc;
 use subagent::{ReviewAgent, mcp};
 
 #[tokio::main]
 async fn main() {
-    mcp::run_stdio(Arc::new(ReviewAgent::new()), "Review").await;
+    mcp::run_stdio(
+        ReviewAgent::default_config(),
+        ReviewAgent::with_config,
+        "Review",
+    )
+    .await;
 }

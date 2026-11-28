@@ -120,6 +120,12 @@ cargo build --release
 
 クライアント設定例は [mcp-config.example.json](mcp-config.example.json) を参照してください。`command` の相対パスはクライアントの作業ディレクトリ基準で解決されるので、実際には絶対パスに書き換えてください。
 各サーバーはエージェントのツールに加えて、タスクを丸ごと実行する `execute` ツールを公開します。
+`execute` の引数は `action`（必須、空でない文字列）、`task_id`（任意、空でない文字列）、`parameters`（任意、object）です。型が違うと `Error: Invalid arguments: ...` を返します。
+
+| 環境変数 | 意味 |
+|---|---|
+| `AGENT_ID` | エージェントの id を上書きする（前後の空白は除く。空なら既定の id） |
+| `MAX_CONCURRENT` | tools/call の同時実行数の上限。正の整数のときだけ有効で、未設定・不正値は無制限 |
 
 > **注意**: CodeGen の `bash_tool` / `file_create` / `str_replace` と Review の `bash_tool` は、任意のコマンド実行・任意パスへの書き込みができます。信頼できるクライアントからのみ使ってください。
 

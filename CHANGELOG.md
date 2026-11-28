@@ -29,8 +29,22 @@
   - HTTP は接続 10 秒・全体 60 秒でタイムアウトする
 - 各エージェントに `default_tools` / `with_tools` を追加した（ツールを差し替えて作れる）
 - エラー情報の `stack` は出力しない（`details.name` にエラー種別を入れる）。ファイル操作のエラーにはパスを含める
-- MCP の `execute` に数値の `task_id` を渡すと、文字列化した ID になる（TS 版は数値のまま）
 - 必要な Rust は 1.89 以降
+
+### 挙動の変更（master の TS 修正 #38 / #40 / #44 / #54 の移植）
+- `A2AProtocol::serialize` は `Result<String, String>` を返す。不正なメッセージは `Invalid A2A message: ...` のエラー
+- `A2AProtocol::deserialize` のエラー型は `serde_json::Error` から `String` になった（`Invalid A2A message: malformed JSON` など）。`validate_value(&Value)` / `is_message` を追加
+- `A2AProtocol::validate_message` は TS #38 と同じ厳密な検証（必須 key の型、timestamp、type、response の status、metadata、type ごとの payload）をする。`Orchestrator::handle_a2a_message` もこれを通るので、以前は受け付けていたメッセージ（payload 不正、timestamp 不正など）がエラー応答になる
+- timestamp は ISO 8601 系（RFC 3339、タイムゾーン無しの日時、日付のみ。日付と時刻の区切りは `T` か空白）だけを有効とし、うるう秒（`:60`）は無効。JS の `Date.parse` が実装依存で受けるその他の書式（`2024/01/01`、RFC 2822 など）は受け付けない
+- `mcp::run_stdio` の引数は `(default_config, build, label)` になった（`AGENT_ID` を反映した config からエージェントを作るため）
+- MCP サーバーは `AGENT_ID`（agent id の上書き）と `MAX_CONCURRENT`（tools/call の同時実行数の上限）を読む
+- MCP の `execute` は引数を agent に渡す前に検証する（TS #54）。`action` が空でない文字列でない、`task_id` が空でない文字列でない（数値も不可）、`parameters` が object でない場合は `Error: Invalid arguments: ...` の isError を返す
+- `Logger::child` / `LogFields` を追加し、Subagent のツール呼び出し・進捗のログに `task_id` / `correlation_id` / `status` / `duration` を載せる
+- `RetryManager` は `max_attempts = 0` のとき関数を呼ばずに `Retry failed` を返す（以前は 1 回呼んでいた。TS と同じ）
+
+### 既知の制限
+- `validate_value` / `is_message` は TS と同じ範囲しか見ないので、検証は通っても Rust の構造体に合わず `deserialize` だけ失敗するメッセージがある（例: task_request の `status: "bogus"`、`metadata.priority: "bogus"`）
+- ツール呼び出しのログの `task_id` / `correlation_id` はエージェントの `current_task` から取るため、同じエージェントで複数タスクが並行して動くと別タスクの値が載ることがある（TS 版も同じ。#69）
 
 ## [1.0.0] - 2025-12-30
 

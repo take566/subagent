@@ -293,5 +293,188 @@ mod tests {
         let info = h.create_error_info(&Error::NoSubagent("x".into()), "CODE");
         assert_eq!(info.code, "CODE");
         assert_eq!(info.message, "No suitable subagent found for action: x");
+        assert_eq!(info.details.unwrap()["name"], "NoSubagent");
+        assert_eq!(
+            h.create_error_info(&Error::other("bad"), "UNKNOWN_ERROR")
+                .details
+                .unwrap()["name"],
+            "Error"
+        );
+    }
+
+    // 以下は TS 版 `tests/utils/error-handler.test.ts`（#42）で足りなかったケース（#65）
+
+    #[test]
+    fn timeout_without_strategy_fails() {
+        assert_eq!(
+            handler(Default::default()).handle_timeout(&Error::other("x"), 0, 3),
+            TimeoutDecision {
+                should_retry: false,
+                action: "fail".into()
+            }
+        );
+    }
+
+    #[test]
+    fn timeout_retries_below_max_and_uses_fallback_at_max() {
+        let e = Error::other("x");
+        let h = handler(ErrorHandlingStrategy {
+            timeout: Some(ErrorAction {
+                fallback: Some("skip".into()),
+                ..ErrorAction::new("retry")
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            h.handle_timeout(&e, 2, 3),
+            TimeoutDecision {
+                should_retry: true,
+                action: "retry".into()
+            }
+        );
+        let skip = TimeoutDecision {
+            should_retry: false,
+            action: "skip".into(),
+        };
+        assert_eq!(h.handle_timeout(&e, 3, 3), skip);
+        assert_eq!(h.handle_timeout(&e, 1, 1), skip);
+    }
+
+    #[test]
+    fn timeout_fallback_defaults_to_fail() {
+        let h = handler(ErrorHandlingStrategy {
+            timeout: Some(ErrorAction::new("retry")),
+            ..Default::default()
+        });
+        assert_eq!(
+            h.handle_timeout(&Error::other("x"), 5, 3),
+            TimeoutDecision {
+                should_retry: false,
+                action: "fail".into()
+            }
+        );
+    }
+
+    #[test]
+    fn validation_without_strategy_fails() {
+        assert_eq!(
+            handler(Default::default()).handle_validation_error(&Error::other("x"), 1),
+            ValidationDecision {
+                action: "fail".into(),
+                should_escalate: false
+            }
+        );
+    }
+
+    #[test]
+    fn validation_escalates_at_or_after_threshold_and_never_when_unset() {
+        let e = Error::other("x");
+        let h = handler(ErrorHandlingStrategy {
+            validation_error: Some(ErrorAction {
+                escalate_after: Some(2),
+                ..ErrorAction::new("retry")
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            h.handle_validation_error(&e, 2),
+            ValidationDecision {
+                action: "retry".into(),
+                should_escalate: true
+            }
+        );
+        assert!(h.handle_validation_error(&e, 3).should_escalate);
+        let unset = handler(ErrorHandlingStrategy {
+            validation_error: Some(ErrorAction::new("retry")),
+            ..Default::default()
+        });
+        assert!(!unset.handle_validation_error(&e, 99).should_escalate);
+        // TS: escalate_after が 0 は falsy なので escalate しない
+        let zero = handler(ErrorHandlingStrategy {
+            validation_error: Some(ErrorAction {
+                escalate_after: Some(0),
+                ..ErrorAction::new("retry")
+            }),
+            ..Default::default()
+        });
+        assert!(!zero.handle_validation_error(&e, 99).should_escalate);
+    }
+
+    #[test]
+    fn tool_failure_without_strategy_or_alternatives() {
+        let e = Error::other("x");
+        let none = ToolFailureDecision {
+            use_alternative: false,
+            alternative_tool: None,
+        };
+        assert_eq!(
+            handler(Default::default()).handle_tool_failure("a", &e),
+            none
+        );
+        let no_alts = handler(ErrorHandlingStrategy {
+            tool_failure: Some(ErrorAction::new("x")),
+            ..Default::default()
+        });
+        assert_eq!(no_alts.handle_tool_failure("a", &e), none);
+    }
+
+    #[test]
+    fn tool_failure_switches_only_for_matching_primary() {
+        let e = Error::other("x");
+        let h = handler(ErrorHandlingStrategy {
+            tool_failure: Some(ErrorAction {
+                alternatives: Some(vec![ToolAlternative {
+                    primary: "a".into(),
+                    backup: "b".into(),
+                }]),
+                ..ErrorAction::new("switch")
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            h.handle_tool_failure("a", &e),
+            ToolFailureDecision {
+                use_alternative: true,
+                alternative_tool: Some("b".into())
+            }
+        );
+        assert_eq!(
+            h.handle_tool_failure("z", &e),
+            ToolFailureDecision {
+                use_alternative: false,
+                alternative_tool: None
+            }
+        );
+    }
+
+    #[test]
+    fn partial_failure_defaults_and_non_flag_action() {
+        let e = Error::other("x");
+        let off = PartialFailureDecision {
+            return_partial: false,
+            notify: false,
+        };
+        assert_eq!(
+            handler(Default::default()).handle_partial_failure(&result(None, false), &e),
+            off
+        );
+        let abort = handler(ErrorHandlingStrategy {
+            partial_failure: Some(ErrorAction::new("abort")),
+            ..Default::default()
+        });
+        assert_eq!(abort.handle_partial_failure(&result(None, false), &e), off);
+    }
+
+    #[test]
+    fn escalation_negative_cases() {
+        let h = handler(Default::default());
+        assert!(!h.should_escalate(&result(Some(0.9), false), &["confidence < 0.5"]));
+        assert!(!h.should_escalate(&result(None, false), &["critical_error"]));
+        assert!(!h.should_escalate(
+            &result(Some(0.1), false),
+            &["requires_approval", "confidence < 0.5"]
+        ));
+        assert!(!h.should_escalate(&result(Some(0.1), true), &[]));
+        assert!(!h.should_escalate(&result(Some(0.1), true), &["unknown"]));
     }
 }
