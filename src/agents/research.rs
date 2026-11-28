@@ -21,7 +21,17 @@ use std::sync::Arc;
 mod llm;
 mod output;
 
-pub use output::{Citation, ResearchResult, SearchError, Source, UNTRUSTED_TAG};
+pub use output::{
+    Citation, CitationRef, ResearchOutput, ResearchResult, SearchError, Source, UNTRUSTED_NOTICE,
+    UNTRUSTED_TAG,
+};
+
+/// `depth`（`quick` / `standard` / `detailed`）の 1 request ごとに予算に足す見込みの token 数。
+/// 不明な値は standard
+pub fn request_reserve_tokens(depth: &str) -> u64 {
+    let d = llm::Depth::parse(Some(&Value::String(depth.into()))).unwrap_or(llm::Depth::Standard);
+    llm::request_reserve(d)
+}
 
 pub struct ResearchAgent {
     base: AgentBase,
@@ -216,13 +226,14 @@ impl Subagent for ResearchAgent {
         ))
     }
 
-    /// LLM（web_search / web_fetch の server tool）で調べ、[`ResearchResult`] を返す。
+    /// LLM（web_search / web_fetch の server tool）で調べ、[`ResearchOutput`] を返す
+    /// （untrusted の notice と downstream 用の text 付き。取得した本文 `cited_text` は入れない）。
     /// LLM が未設定なら送らずに [`crate::llm::LlmError::NotConfigured`]
     async fn call_typed(&self, args: Value, ctx: CallCtx) -> Result<Value> {
         self.llm.ensure_configured()?;
         let args = llm::Args::parse(&args)?;
         let result = llm::research(&self.llm, &args, ctx).await?;
-        Ok(serde_json::to_value(result)?)
+        Ok(serde_json::to_value(ResearchOutput::from(result))?)
     }
 
     async fn execute(&self, task: Task) -> Result<TaskResult> {

@@ -39,11 +39,11 @@ fn limits(budget: &Arc<TokenBudget>) -> RunnerLimits {
 }
 
 #[test]
-fn estimate_is_serialized_bytes_over_four_rounded_up_plus_max_tokens() {
+fn estimate_is_serialized_bytes_over_three_rounded_up_plus_max_tokens() {
     let mut req = template(100);
     req.messages = vec![Message::user_text("x".repeat(400))];
     let bytes = serde_json::to_vec(&req).unwrap().len() as u64;
-    assert_eq!(estimate_request_tokens(&req), bytes.div_ceil(4) + 100);
+    assert_eq!(estimate_request_tokens(&req), bytes.div_ceil(3) + 100);
 }
 
 #[tokio::test]
@@ -114,4 +114,44 @@ async fn off_by_default() {
         .unwrap();
     assert_eq!(out.stop, RunStop::EndTurn);
     assert_eq!(llm.requests().len(), 1);
+}
+
+/// per_request_reserve（server tool が足す入力の見込み）も見積もりに足す
+#[tokio::test]
+async fn per_request_reserve_is_added_to_the_estimate() {
+    let mut req = template(100);
+    req.messages = vec![Message::user_text("go")];
+    let need = estimate_request_tokens(&req);
+    assert_eq!(RunnerLimits::default().per_request_reserve, 0);
+    for (reserve, sent) in [(0, 1), (1, 0)] {
+        let llm = Arc::new(ScriptedLlm::new(vec![Ok(ScriptedLlm::text_response("x"))]));
+        let budget = Arc::new(TokenBudget::new(need));
+        let out = ConversationRunner::new(llm.clone(), template(100), Arc::new(NoTools))
+            .with_limits(RunnerLimits {
+                per_request_reserve: reserve,
+                ..limits(&budget)
+            })
+            .run(vec![Message::user_text("go")])
+            .await
+            .unwrap();
+        assert_eq!(llm.requests().len(), sent, "reserve {reserve}");
+        if sent == 0 {
+            assert_eq!(out.stop, RunStop::TokenBudget);
+        }
+    }
+}
+
+/// エージェントの上限（AgentLlmSettings::runner_limits）は全エージェントで送る前に確かめる
+#[test]
+fn agent_runner_limits_check_the_budget_before_sending() {
+    use subagent::llm::{AgentKind, AgentLlmSettings};
+    for kind in [
+        AgentKind::Research,
+        AgentKind::CodeGen,
+        AgentKind::Review,
+        AgentKind::Document,
+    ] {
+        let l = AgentLlmSettings::defaults(kind).runner_limits(tokio::time::Instant::now());
+        assert!(l.check_budget_before_send, "{kind:?}");
+    }
 }

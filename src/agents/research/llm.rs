@@ -41,7 +41,7 @@ pub(crate) enum Depth {
 }
 
 impl Depth {
-    fn parse(v: Option<&Value>) -> Result<Self> {
+    pub(crate) fn parse(v: Option<&Value>) -> Result<Self> {
         match v {
             None | Some(Value::Null) => Ok(Depth::Standard),
             Some(Value::String(s)) => match s.as_str() {
@@ -193,12 +193,22 @@ fn stop_name(stop: &RunStop) -> String {
     }
 }
 
+/// web_search 1 回で入力に足される token の多めの見込み（送る前の予算確認に使う）
+pub(crate) const SEARCH_RESERVE_TOKENS: u64 = 8_000;
+
+/// 1 request ごとに予算に足す見込み: web_fetch の max_uses × max_content_tokens +
+/// web_search の max_uses × [`SEARCH_RESERVE_TOKENS`]
+pub(crate) fn request_reserve(depth: Depth) -> u64 {
+    depth.fetch_uses() * FETCH_MAX_CONTENT_TOKENS + depth.search_uses() * SEARCH_RESERVE_TOKENS
+}
+
 /// LLM で調べる。cancel されたら [`Error::Other`]（"Request cancelled"）
 pub(crate) async fn research(llm: &AgentLlm, args: &Args, ctx: CallCtx) -> Result<ResearchResult> {
     let settings = &llm.settings;
     let template = settings.request_template(Some(SYSTEM_PROMPT.to_string()), tools(args));
+    // runner_limits は送る前に予算を確かめる。server tool の結果の分を 1 request ごとに足す
     let mut limits = settings.runner_limits(ctx.deadline);
-    limits.check_budget_before_send = true;
+    limits.per_request_reserve = request_reserve(args.depth);
     let runner = ConversationRunner::new(llm.client.clone(), template, Arc::new(NoClientTools))
         .with_limits(limits)
         .with_observer(Arc::new(ctx.progress.clone()));
@@ -209,6 +219,8 @@ pub(crate) async fn research(llm: &AgentLlm, args: &Args, ctx: CallCtx) -> Resul
         r = runner.run(vec![user_message(args)]) => r?,
     };
 
+    let collected = output::collect(&outcome.messages);
+    let found = !collected.sources.is_empty();
     let partial = match &outcome.stop {
         RunStop::EndTurn | RunStop::StopSequence => false,
         RunStop::Truncated
@@ -220,6 +232,8 @@ pub(crate) async fn research(llm: &AgentLlm, args: &Args, ctx: CallCtx) -> Resul
         RunStop::Refusal => {
             return Err(Error::other("research was refused by the model (refusal)"));
         }
+        // 出典を集めた後なら、そこまでを partial で返す
+        RunStop::LlmError | RunStop::Other(_) if found => true,
         RunStop::LlmError => {
             return Err(match outcome.error {
                 Some(e) => Error::Llm(e),
@@ -233,9 +247,8 @@ pub(crate) async fn research(llm: &AgentLlm, args: &Args, ctx: CallCtx) -> Resul
         }
     };
     let stop_reason = stop_name(&outcome.stop);
-    let collected = output::collect(&outcome.messages);
     let summary = output::final_text(&outcome.messages);
-    if partial && summary.trim().is_empty() && collected.sources.is_empty() {
+    if partial && summary.trim().is_empty() && !found {
         return Err(Error::other(format!(
             "research stopped ({stop_reason}) before any result"
         )));

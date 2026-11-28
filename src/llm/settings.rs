@@ -143,12 +143,14 @@ impl AgentLlmSettings {
         req
     }
 
-    /// 1 タスク分の上限（新しい token 予算と deadline）
+    /// 1 タスク分の上限（新しい token 予算と deadline）。送る前に予算を確かめる
+    /// （[`RunnerLimits::check_budget_before_send`]）
     pub fn runner_limits(&self, deadline: Instant) -> RunnerLimits {
         RunnerLimits {
             max_iterations: self.max_iterations,
             token_budget: Some(Arc::new(TokenBudget::new(self.token_budget))),
             deadline: Some(deadline),
+            check_budget_before_send: true,
             ..RunnerLimits::default()
         }
     }
