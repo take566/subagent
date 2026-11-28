@@ -1,9 +1,7 @@
 //! MCP サーバーの出力を、移植元 TS 版の出力（tests/golden/*.json）と突き合わせる。
 //!
-//! golden は TS 版（@modelcontextprotocol/sdk 0.5.0）の各サーバーに
-//! initialize → tools/list → tools/call を送って記録したもの。
-//! ただし `document.json` の tools のうち `notion_page_create` / `notion_page_update` は記録後に
-//! 手で足したもの（記録時の TS には無く、TS #45 の name / description / 引数定義に合わせた）。
+//! golden は TS 版の最終状態（`29941ec`、@modelcontextprotocol/sdk 0.5.0）の各サーバーに
+//! initialize → tools/list → tools/call を送って記録したもの（手順は tests/golden/README.md）。
 //! 実行ごとに変わる値（duration_ms、作業ディレクトリ、タイムスタンプ）は正規化して比較する。
 
 use serde_json::{Value, json};
@@ -30,6 +28,8 @@ impl Client {
             .env("SUBAGENT_LOG_LEVEL", "debug") // ログが stdout を汚さないことも確かめる
             .env_remove("AGENT_ID")
             .env_remove("MAX_CONCURRENT")
+            // 開発機や CI にトークンがあっても、golden の Notion 呼び出しで本物の API を叩かない
+            .env_remove("NOTION_TOKEN")
             .envs(envs.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -181,6 +181,13 @@ fn check_server(agent: &str, bin: &str) {
             exp_v["result"]["issues"] = json!([]);
             exp_v["result"]["score"] = json!(100);
             exp_v["metrics"]["tools_called"] = json!(0);
+        }
+        if agent == "document"
+            && name.starts_with("notion_")
+            && let Some(text) = exp_v.as_str().filter(|t| t.ends_with("is required"))
+        {
+            // 意図した差分（CHANGELOG 1.1.0）: Notion ツールの引数エラーには `Invalid parameter: ` が付く
+            exp_v = json!(text.replacen("Error: ", "Error: Invalid parameter: ", 1));
         }
         assert_eq!(got_v, exp_v, "{agent}/{name}: result");
     }

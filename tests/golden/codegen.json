@@ -101,7 +101,78 @@
           }
         ]
       }
+    },
+    {
+      "call": {
+        "name": "file_create",
+        "arguments": {
+          "path": "s.txt",
+          "content": "a.b axb a.b $1"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"path\": \"<WORK>/s.txt\",\n  \"created\": true,\n  \"size\": 14\n}"
+          }
+        ]
+      }
+    },
+    {
+      "call": {
+        "name": "str_replace",
+        "arguments": {
+          "file": "s.txt",
+          "search": "a.b",
+          "replace": "[$&]"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"file\": \"s.txt\",\n  \"replaced\": true,\n  \"occurrences\": 2\n}"
+          }
+        ]
+      }
+    },
+    {
+      "call": {
+        "name": "str_replace",
+        "arguments": {
+          "file": "s.txt",
+          "search": "zzz",
+          "replace": "q"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"file\": \"s.txt\",\n  \"replaced\": false,\n  \"occurrences\": 0\n}"
+          }
+        ]
+      }
+    },
+    {
+      "call": {
+        "name": "str_replace",
+        "arguments": {
+          "file": "s.txt",
+          "search": "",
+          "replace": "q"
+        }
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"file\": \"s.txt\",\n  \"replaced\": false,\n  \"occurrences\": 0\n}"
+          }
+        ]
+      }
     }
   ],
-  "stdout_non_json_lines": 45
+  "stdout_non_json_lines": 49
 }
