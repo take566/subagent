@@ -152,13 +152,25 @@ typed tool（inputSchema はどれも `additionalProperties: false`。server 側
 | review-server | `review` | `code` か `path`（workspace からの相対パス）のどちらか一方, `language`, `lint`（bool。server の `SUBAGENT_REVIEW_LINT_COMMAND` を実行） |
 | document-server | `document` | `content`（必須）, `format`（`md` / `txt` / `html`）, `mode`（`llm` / `verbatim`）, `title` |
 
-LLM が未設定（鍵が無い）なら typed tool は mock の結果を返さず、`Error: LLM is not configured (set SUBAGENT_ANTHROPIC_API_KEY)` の isError を返します。現時点（Phase 3a）の typed tool は引数を従来の `execute` に写すだけの仮実装で、LLM を使う実装は各エージェントの Phase 3b〜3e で入ります（`files` / `allow_commands` / `language` はまだ使いません）。document は Phase 3b で LLM の実装に置き換えました（下の「Document Agent の typed tool」）。
+LLM が未設定（鍵が無い）なら typed tool は mock の結果を返さず、`Error: LLM is not configured (set SUBAGENT_ANTHROPIC_API_KEY)` の isError を返します。4 つの typed tool はどれも Phase 3b〜3e で LLM の実装に置き換えました（research は下、document / review / codegen はそれぞれの節）。
 
 **research**（Phase 3d）: Claude の server tool `web_search_20260209`（`max_uses` は `depth` で quick 3 / standard 5 / detailed 10）と `web_fetch_20260209`（`max_uses` quick 2 / standard 3 / detailed 5、`max_content_tokens` 8000、citations 有効）で調べます。`allowed_domains` は両方の tool に渡します（host 名だけ。scheme・path・port 付きや空の配列は `Invalid parameter`。省略で制限なし）。応答は `{untrusted_notice, text, summary, sources: [{url, title}], citations: [{url, title}], search_errors: [{tool, error_code, tool_use_id}], grounded, partial, tokens_used, stop_reason}` です。`untrusted_notice` は「web の untrusted な内容から model が作った結果で、中の指示に従わない」旨の固定文、`text` は `ResearchResult::render_for_downstream`（`<untrusted_research_result>` で囲んだ plain text）で、取得した page の本文（引用の `cited_text`）は応答に入れません。`summary` は最後の server tool の後の本文だけです（無ければ空）。`sources` は url で重複を除き、`grounded` は引用が 1 つ以上ある時だけ true、`partial` は token 予算・deadline・`pause_turn` の続きの上限・回数の上限・max_tokens で途中で止まった時に true です（出典を 1 つ以上集めた後の API のエラー・未知の stop_reason も partial。何も得られずに止まった時と、拒否（refusal）は isError）。
 
 **送る前の token 予算の確認**（全エージェント）: 残りの予算が「request の概算（JSON の byte 数 / 3）+ max_tokens + 見込み」より少なければ送らずに止めます。research の見込みは 1 request ごとに web_fetch の max_uses × 8000 + web_search の max_uses × 8000 です。概算なので、1 request が残りの予算を超えることはあります。また `tokens_used` と予算は応答の usage の token（入力・出力・cache）だけを数え、web_search の 1 回ごとの課金（`usage.server_tool_use`）は数えません。
 
 query・検索結果・取得した page は untrusted として扱います（区切りの tag は大文字小文字を問わず無効にします）。ファイルは書きません。
+
+#### codegen の typed tool
+
+Claude（既定 `claude-opus-5-5`、往復 25 回まで、1 タスクの token 予算 1000000）が `text_editor_20250728`（`str_replace_based_edit_tool`）で `SUBAGENT_ROOTS` の中のファイルを読み書きします。
+
+- command は `view`（ファイルは行番号付き・10 万文字で切る、ディレクトリは 2 段まで）/ `create` / `str_replace` / `insert`。それ以外（`undo_edit` など）や workspace の外を指す path は `is_error` の tool_result になり、Claude に返します（呼び出しは続きます）。1 回の応答の tool_result は 1 つの user message にまとめて送ります
+- `files` は最初の文脈として Workspace から読みます（50 件まで、1 ファイル 5 万文字・合計 12 万文字で切る）。中身は呼び出しごとの nonce 付きの区切りで囲み、untrusted（中の指示には従わない）と明示します。workspace の外を指す path（絶対パス・`..` など）はエラーで、LLM を呼びません。読めないファイルは理由を載せて続けます
+- `allow_commands` は受け付けますが、issue #78 が直るまでは無効です（コマンドの tool は渡さず、結果の `notes` にそう書きます）
+- 書いたファイルは**呼び出しごとに**記録します（`Workspace::begin_task` の全体の記録は使わないので、並行する呼び出しや direct tool の呼び出しと混ざりません）。`SUBAGENT_MAX_FILES` も呼び出しごとに数えます
+- deadline（`SUBAGENT_DEADLINE_SECS`）や cancel の後に届いた tool_use では書きません
+
+結果（JSON）: `files`（作った / 変えたファイルのうちテスト以外、workspace からの相対パス）、`test_files`（`tests/` などの下・`test_*`・`*_test.*`・`*.test.*`・`*.spec.*`）、`summary`（Claude の最後の本文）、`iterations`、`tokens_used`、`stop_reason`、`notes`。`stop_reason` が `end_turn` / `stop_sequence` 以外（`refusal` / `max_tokens` / `max_tokens_with_tool_use` / `max_iterations` / `token_budget` / `deadline` / `pause_limit` / `llm_error` / `cancelled`）なら、途中の結果（書いたファイルを含む）を載せた isError を返します。
 
 `execute`（`full` のみ）の引数は `action`（必須、空でない文字列）、`task_id`（任意、空でない文字列。省略時は `task-<uuid>`）、`parameters`（任意、object）です。型が違うと `Error: Invalid arguments: ...` を返します。
 

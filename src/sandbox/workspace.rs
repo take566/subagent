@@ -666,14 +666,61 @@ impl Workspace {
         self.write_locked(&mut changes, rel, content)
     }
 
+    /// [`Self::create`] と同じだが、記録と件数の上限は全体（[`Self::changes`]）ではなく `log` を使う。
+    /// 1 回の呼び出しごとに記録したい時（並行する呼び出しを混ぜない、[`Self::begin_task`] に
+    /// 消されない）に使う。操作の直列化は同じ
+    pub fn create_tracked(
+        &self,
+        log: &mut Vec<FileChange>,
+        rel: &str,
+        content: &str,
+    ) -> Result<ChangeKind> {
+        let _guard = self.lock();
+        self.write_locked(log, rel, content)
+    }
+
+    /// [`Self::str_replace`] の `log` 版（[`Self::create_tracked`] を参照）
+    pub fn str_replace_tracked(
+        &self,
+        log: &mut Vec<FileChange>,
+        rel: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<()> {
+        let _guard = self.lock();
+        self.str_replace_locked(log, rel, old, new)
+    }
+
+    /// [`Self::insert`] の `log` 版（[`Self::create_tracked`] を参照）
+    pub fn insert_tracked(
+        &self,
+        log: &mut Vec<FileChange>,
+        rel: &str,
+        after_line: usize,
+        text: &str,
+    ) -> Result<()> {
+        let _guard = self.lock();
+        self.insert_locked(log, rel, after_line, text)
+    }
+
     /// `old` がちょうど 1 回現れるときだけ `new` に置き換える（どちらもリテラル）
     pub fn str_replace(&self, rel: &str, old: &str, new: &str) -> Result<()> {
+        let mut changes = self.lock();
+        self.str_replace_locked(&mut changes, rel, old, new)
+    }
+
+    fn str_replace_locked(
+        &self,
+        changes: &mut Vec<FileChange>,
+        rel: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<()> {
         if old.is_empty() {
             return Err(Error::InvalidParameter(
                 "`old_str` must not be empty".into(),
             ));
         }
-        let mut changes = self.lock();
         let content = self.read_locked(rel)?;
         match content.matches(old).count() {
             0 => Err(Error::InvalidParameter(format!(
@@ -681,7 +728,7 @@ impl Workspace {
             ))),
             1 => {
                 let updated = content.replacen(old, new, 1);
-                self.write_locked(&mut changes, rel, &updated).map(|_| ())
+                self.write_locked(changes, rel, &updated).map(|_| ())
             }
             n => Err(Error::InvalidParameter(format!(
                 "Found {n} matches for `old_str` in {rel}; it must match exactly once \
@@ -709,6 +756,16 @@ impl Workspace {
     /// `after_line` 行目の後ろ（0 なら先頭）に `text` を行として挿入する
     pub fn insert(&self, rel: &str, after_line: usize, text: &str) -> Result<()> {
         let mut changes = self.lock();
+        self.insert_locked(&mut changes, rel, after_line, text)
+    }
+
+    fn insert_locked(
+        &self,
+        changes: &mut Vec<FileChange>,
+        rel: &str,
+        after_line: usize,
+        text: &str,
+    ) -> Result<()> {
         let content = self.read_locked(rel)?;
         let lines: Vec<&str> = content.split_inclusive('\n').collect();
         if after_line > lines.len() {
@@ -726,7 +783,7 @@ impl Workspace {
             out.push('\n');
         }
         out.push_str(&lines[after_line..].concat());
-        self.write_locked(&mut changes, rel, &out).map(|_| ())
+        self.write_locked(changes, rel, &out).map(|_| ())
     }
 
     /// 行番号付きで表示する。`range` は 1 始まりの (開始, 終了)。終了 None は末尾まで

@@ -1,0 +1,30 @@
+[
+  {
+    "id": "msg_replay_codegen_1",
+    "model": "claude-opus-5-5",
+    "content": [
+      { "type": "text", "text": "Creating the file." },
+      {
+        "type": "tool_use",
+        "id": "toolu_replay_1",
+        "name": "str_replace_based_edit_tool",
+        "input": { "command": "create", "path": "src/add.rs", "file_text": "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n" }
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_replay_2",
+        "name": "str_replace_based_edit_tool",
+        "input": { "command": "create", "path": "tests/add_test.rs", "file_text": "#[test]\nfn adds() {}\n" }
+      }
+    ],
+    "stop_reason": "tool_use",
+    "usage": { "input_tokens": 100, "output_tokens": 50 }
+  },
+  {
+    "id": "msg_replay_codegen_2",
+    "model": "claude-opus-5-5",
+    "content": [{ "type": "text", "text": "Added add() and a test." }],
+    "stop_reason": "end_turn",
+    "usage": { "input_tokens": 200, "output_tokens": 20 }
+  }
+]

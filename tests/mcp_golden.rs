@@ -840,15 +840,14 @@ fn invalid_agent_llm_settings_exit_non_zero() {
 #[test]
 fn replay_backend_serves_typed_tools() {
     for (agent, bin) in all_bins() {
-        // research と document は空の記録では答えられない（LLM の経路。research は tests/research_agent.rs の
-        // replay_fixture_succeeds、document は replay/document.json の document_replay_writes_the_document）
-        if agent == "research" || agent == "document" {
+        // LLM を使う research / document / codegen は、それぞれ自分の記録で確かめる
+        // （tests/research_replay_stdio.rs、document_replay_writes_the_document、tests/codegen_replay.rs）。
+        // ここでは review を replay/review.json で通す
+        if agent != "review" {
             continue;
         }
-        // LLM を呼ぶ agent は自分の記録（tests/golden/replay/<agent>.json）を使う
-        let name = if agent == "review" { "review" } else { "empty" };
         let fixture = format!(
-            "{}/tests/golden/replay/{name}.json",
+            "{}/tests/golden/replay/review.json",
             env!("CARGO_MANIFEST_DIR")
         );
         let dir = tempfile::tempdir().unwrap();
