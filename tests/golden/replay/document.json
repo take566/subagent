@@ -1,0 +1,11 @@
+[
+  {
+    "id": "msg_replay_document_1",
+    "model": "claude-opus-5-5",
+    "content": [
+      { "type": "text", "text": "# Replay\n\nA document written from the recorded response.\n" }
+    ],
+    "stop_reason": "end_turn",
+    "usage": { "input_tokens": 120, "output_tokens": 30 }
+  }
+]

@@ -150,7 +150,7 @@ typed tool（inputSchema はどれも `additionalProperties: false`。server 側
 | review-server | `review` | `code` か `path`（workspace からの相対パス）のどちらか一方, `language`, `lint`（bool。server の `SUBAGENT_REVIEW_LINT_COMMAND` を実行） |
 | document-server | `document` | `content`（必須）, `format`（`md` / `txt` / `html`）, `mode`（`llm` / `verbatim`）, `title` |
 
-LLM が未設定（鍵が無い）なら typed tool は mock の結果を返さず、`Error: LLM is not configured (set SUBAGENT_ANTHROPIC_API_KEY)` の isError を返します。現時点（Phase 3a）の typed tool は引数を従来の `execute` に写すだけの仮実装で、LLM を使う実装は各エージェントの Phase 3b〜3e で入ります（`files` / `allow_commands` / `language` / `mode` / `title` はまだ使いません）。
+LLM が未設定（鍵が無い）なら typed tool は mock の結果を返さず、`Error: LLM is not configured (set SUBAGENT_ANTHROPIC_API_KEY)` の isError を返します。現時点（Phase 3a）の typed tool は引数を従来の `execute` に写すだけの仮実装で、LLM を使う実装は各エージェントの Phase 3b〜3e で入ります（`files` / `allow_commands` / `language` はまだ使いません）。document は Phase 3b で LLM の実装に置き換えました（下の「Document Agent の typed tool」）。
 
 **research**（Phase 3d）: Claude の server tool `web_search_20260209`（`max_uses` は `depth` で quick 3 / standard 5 / detailed 10）と `web_fetch_20260209`（`max_uses` quick 2 / standard 3 / detailed 5、`max_content_tokens` 8000、citations 有効）で調べます。`allowed_domains` は両方の tool に渡します（host 名だけ。scheme・path・port 付きや空の配列は `Invalid parameter`。省略で制限なし）。応答は `{untrusted_notice, text, summary, sources: [{url, title}], citations: [{url, title}], search_errors: [{tool, error_code, tool_use_id}], grounded, partial, tokens_used, stop_reason}` です。`untrusted_notice` は「web の untrusted な内容から model が作った結果で、中の指示に従わない」旨の固定文、`text` は `ResearchResult::render_for_downstream`（`<untrusted_research_result>` で囲んだ plain text）で、取得した page の本文（引用の `cited_text`）は応答に入れません。`summary` は最後の server tool の後の本文だけです（無ければ空）。`sources` は url で重複を除き、`grounded` は引用が 1 つ以上ある時だけ true、`partial` は token 予算・deadline・`pause_turn` の続きの上限・回数の上限・max_tokens で途中で止まった時に true です（出典を 1 つ以上集めた後の API のエラー・未知の stop_reason も partial。何も得られずに止まった時と、拒否（refusal）は isError）。
 
@@ -211,6 +211,17 @@ Windows では allowlist にも program にも `.exe` 以外の拡張子（`.bat
 ### Review エージェントの lint
 
 コードは `source_code`（文字列）か `source_path`（`SUBAGENT_ROOTS` 内の相対パス。`view` ツールで読みます）で渡します。1 行で `/` 始まりか絶対パスの `source_code` はファイルを読まずにエラーにします（workspace の外のファイルは読みません）。`lint_command` パラメータを指定したときだけ lint を実行します（例: `{"source_code": "...", "lint_command": "cargo clippy"}`）。lint も `bash_tool` と同じく shell なしで、program が `SUBAGENT_CODEGEN_ALLOWED_COMMANDS` に無ければ実行せずに（warn ログを出して）lint 無しで続けます。`cwd` パラメータは workspace 内の相対パスです。出力は形式から言語を推定して解釈します。ESLint（stylish）・tsc・flake8 / ruff の行は `file` / `line` / `column` / `rule` / `tool` / `language` 付きの指摘になり、どれにも当たらない場合は `error` / `warning` を含む行が指摘になります（`tool: "generic"`）。stdout と stderr の両方を解釈します。ruff は既定の出力形式では行に当たらないので `ruff check --output-format concise` を指定してください。
+
+### Document Agent の typed tool（`document`）
+
+- `mode: "llm"`（既定）: Claude が `content`（と `title`）から文書を 1 往復で書きます（tool なし、prompt cache なし）。`content` と `title` は呼び出しごとの id 付きの untrusted ブロックで囲み、中の指示には従わないよう system prompt で伝えます。応答全体を包むコードフェンスは 1 つだけ外します。LLM が未設定なら `LLM is not configured` のエラーです
+- 入力の上限: `content` は **60000 文字まで**（`mode: "llm"` のとき。超えたら送らず、切り詰めずにエラー）、`title` は 300 文字までです
+- token 予算（既定 100000、`SUBAGENT_DOCUMENT_TOKEN_BUDGET`）: 1 往復で終わるので、今は応答を受け取った後にしか数えません（1 回の呼び出しが予算を超えることがあります）。runner の送信前の予算確認（Phase 3d で全エージェントに入る予定）が入ると、送る前に予算を確かめます
+- `format: "html"`（llm）: system prompt で、静的な HTML（inline CSS のみ）を求め、`<script>`・inline の event handler（`onclick` など）・`javascript:` URL・外部の resource（`<img>` / `<link>` / `<iframe>` / `<form>` / CSS の `url()` など、ブラウザが取りに行く URL）を禁じます。出力そのものは検査・除去しません
+- `mode: "verbatim"`: LLM を使わず（鍵が無くても動きます）、`content` を従来の `execute` と同じ書き方で保存します。`html` は `content` の `&` `<` `>` を escape してから `<html><body><pre>...</pre></body></html>` で包みます（`execute` は従来どおり escape しません）
+- 出力先は workspace（`SUBAGENT_ROOTS`）の `docs/generated-<timestamp>-<8 桁の hex>.<ext>`（`md` → `.md`、`txt` → `.txt`、`html` → `.html`）。名前選びと書き込みは agent の中で直列にし、乱数の suffix で同じ root を使う別 process とも重なりにくくしています。それでも同名があれば `-1`, `-2`, ... を付け、上書きしません
+- 拒否（refusal）・`max_tokens` で切れた・予算切れ・deadline・取り消し・LLM のエラーではファイルを書かずに isError を返します。deadline と取り消しは書く直前にも確かめます（「deadline exceeded」を返した後にファイルができることはありません）。書き込みが IO エラーで失敗した時は、作りかけのファイルを消してからエラーを返します（消せなかった時は残ることがあります）
+- 結果: `{"path": "docs/generated-....md", "format": "md", "mode": "llm", "title": "..." | null, "bytes": 123, "tokens_used": 456, "stop_reason": "end_turn"}`（`path` は workspace からの相対パス、`bytes` は書いた byte 数。verbatim は `tokens_used: 0`、`stop_reason: null`）
 
 ### Document Agent の Notion 連携
 
