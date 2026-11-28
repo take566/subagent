@@ -17,9 +17,16 @@
 - Review エージェントは `npm run lint` を固定で実行しなくなった。`lint_command` パラメータを指定したときだけ lint を実行する。`metrics.tools_called` は実際に呼んだツール数になった
 - Review エージェントは Windows の絶対パス（`C:\...`）もファイルパスとして扱う
 - CodeGen / Document エージェントに出力先ディレクトリ（`with_options` の `base_dir`）を追加した
-- `str_replace` の `search` はリテラル文字列、`replace` も `$1` `$&` などを解釈しないそのままの文字列として扱う（TS #53 と同じ）。一致が 0 件ならファイルを書き戻さず `replaced: false` を返す
-- Review の lint 出力は ESLint stylish / tsc / flake8・ruff を言語別に解釈し、`file` `line` `column` `rule` `tool` `language` 付きの指摘にする（TS #41 と同じ）。行末の `\r` は落としてから解釈する（CRLF の出力も読める）
-- Document エージェントに Notion の `notion_page_create` / `notion_page_update` ツールを追加した（TS #45 と同じ。`NOTION_TOKEN` は呼び出し時に読む）
+- `str_replace` の `search` はリテラル文字列、`replace` も `$1` `$&` などを解釈しないそのままの文字列として扱う（TS #53 と同じ）。一致が 0 件ならファイルを書き戻さず `replaced: false` を返す。JS の置換規則を再現していた公開関数 `tools::js_replace_all` は削除した
+- Review の lint 出力は ESLint stylish / tsc / flake8・ruff を言語別に解釈し、`file` `line` `column` `rule` `tool` `language` 付きの指摘にする（TS #41 と同じ）。TS との違い:
+  - 行末の `\r` は落としてから解釈する（CRLF の出力も読める）
+  - stdout に加えて stderr も解釈する（TS は stdout のみ）
+- Document エージェントに Notion の `notion_page_create` / `notion_page_update` ツールを追加した（TS #45 と同じ。`NOTION_TOKEN` は呼び出し時に読む）。TS との違い:
+  - 2000 文字ごとの分割で、サロゲートペア（絵文字など）を途中で切らない（TS は UTF-16 単位でそのまま切る）
+  - 文字列でないパラメータは `InvalidParameter` エラーにする。`null` は未指定扱いで、`content: null` は空文字列として扱う（TS は `split` で例外）
+  - 引数エラーのメッセージには `Invalid parameter: ` が前に付く（例: `Invalid parameter: page_id is required`）
+  - ページ作成後の本文追記が失敗したら、エラーに作成済みの page_id を含める
+  - HTTP は接続 10 秒・全体 60 秒でタイムアウトする
 - 各エージェントに `default_tools` / `with_tools` を追加した（ツールを差し替えて作れる）
 - エラー情報の `stack` は出力しない（`details.name` にエラー種別を入れる）。ファイル操作のエラーにはパスを含める
 - MCP の `execute` に数値の `task_id` を渡すと、文字列化した ID になる（TS 版は数値のまま）

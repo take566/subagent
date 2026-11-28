@@ -226,7 +226,10 @@ impl Tool for LintTool {
     async fn invoke(&self, params: JsonMap) -> Result<Value> {
         let command = required_str(&params, "command")?;
         let out = run_shell(command, optional_str(&params, "cwd")).await?;
-        let issues = parse_lint_output(&out.stdout);
+        // TS は stdout だけを見ていたが、cargo clippy のように指摘を stderr に出すツールも
+        // あるので両方を解釈する（stdout → stderr の順。言語の推定はそれぞれ別に行う）
+        let mut issues = parse_lint_output(&out.stdout);
+        issues.extend(parse_lint_output(&out.stderr));
         Ok(match out.error {
             None => json!({
                 "success": true,
@@ -668,6 +671,23 @@ mod tests {
                 .unwrap()
                 .starts_with("Command failed: exit 3")
         );
+    }
+
+    #[tokio::test]
+    async fn lint_tool_parses_stdout_and_stderr() {
+        let r = LintTool::default()
+            .invoke(map(json!({
+                "command": "echo a.py:1:2: E1 out&& echo b.py:3:4: W2 err 1>&2"
+            })))
+            .await
+            .unwrap();
+        let issues = r["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), 2, "{r}");
+        assert_eq!(issues[0]["file"], "a.py");
+        assert_eq!(issues[0]["rule"], "E1");
+        assert_eq!(issues[1]["file"], "b.py");
+        assert_eq!(issues[1]["rule"], "W2");
+        assert_eq!(issues[1]["type"], "warning");
     }
 
     #[test]

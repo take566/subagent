@@ -125,7 +125,7 @@ cargo build --release
 
 ### Review エージェントの lint
 
-`source_code`（文字列）は必須で、`/` で始まるか絶対パスならファイルとして読み込みます。`lint_command` パラメータを指定したときだけ lint を実行します（例: `{"source_code": "...", "lint_command": "cargo clippy"}`）。出力は形式から言語を推定して解釈します。ESLint（stylish）・tsc・flake8 / ruff の行は `file` / `line` / `column` / `rule` / `tool` / `language` 付きの指摘になり、どれにも当たらない場合は `error` / `warning` を含む行が指摘になります（`tool: "generic"`）。
+`source_code`（文字列）は必須で、`/` で始まるか絶対パスならファイルとして読み込みます。`lint_command` パラメータを指定したときだけ lint を実行します（例: `{"source_code": "...", "lint_command": "cargo clippy"}`）。出力は形式から言語を推定して解釈します。ESLint（stylish）・tsc・flake8 / ruff の行は `file` / `line` / `column` / `rule` / `tool` / `language` 付きの指摘になり、どれにも当たらない場合は `error` / `warning` を含む行が指摘になります（`tool: "generic"`）。stdout と stderr の両方を解釈します。ruff は既定の出力形式では行に当たらないので `ruff check --output-format concise` を指定してください。
 
 ### Document Agent の Notion 連携
 
@@ -139,6 +139,8 @@ Document Agent は次のツールを提供します。
 ```bash
 NOTION_TOKEN=... ./target/release/document-server
 ```
+
+HTTPS は rustls で、証明書の検証には OS の証明書ストア（rustls-platform-verifier）を使います。コンテナなどで動かす場合は CA 証明書（Debian / Ubuntu なら `ca-certificates`）を入れておいてください。タイムアウトは接続 10 秒・リクエスト全体 60 秒です。本文の追記がページ作成後に失敗した場合、エラーに作成済みの page_id を含めます（再実行で重複ページを作らないように `notion_page_update` で続きを追記してください）。
 
 ## ログ
 

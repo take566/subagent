@@ -14,13 +14,37 @@ pub const NOTION_API: &str = "https://api.notion.com/v1";
 pub const NOTION_VERSION: &str = "2022-06-28";
 
 /// Notion API へのリクエスト
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct NotionHttpRequest {
     pub method: &'static str,
     pub url: String,
     /// `(name, value)`。順序は TS の `headers` と同じ
     pub headers: Vec<(String, String)>,
     pub body: Value,
+}
+
+/// `Authorization` ヘッダの値（トークン）はログ等に出さない
+impl std::fmt::Debug for NotionHttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(k, v)| {
+                let v = if k.eq_ignore_ascii_case("authorization") {
+                    "<redacted>"
+                } else {
+                    v.as_str()
+                };
+                (k.as_str(), v)
+            })
+            .collect();
+        f.debug_struct("NotionHttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &headers)
+            .field("body", &self.body)
+            .finish()
+    }
 }
 
 /// Notion API からのレスポンス
@@ -59,7 +83,12 @@ impl NotionClient {
 
     /// 実際の Notion API（reqwest）と環境変数 `NOTION_TOKEN` を使うクライアント
     pub fn from_env() -> Self {
-        NotionClient::new(Arc::new(ReqwestHttp::default()), Arc::new(token_from_env))
+        Self::from_env_with(Arc::new(ReqwestHttp::default()))
+    }
+
+    /// 任意の HTTP と環境変数 `NOTION_TOKEN`（呼び出しのたびに読む）を使うクライアント
+    pub fn from_env_with(http: Arc<dyn NotionHttp>) -> Self {
+        NotionClient::new(http, Arc::new(token_from_env))
     }
 
     /// Notion API 呼び出し。トークンは呼び出しのたびに読む
@@ -96,21 +125,45 @@ impl Default for NotionClient {
     }
 }
 
+/// 接続のタイムアウト
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// 1 リクエスト全体のタイムアウト
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// reqwest（rustls）で送る [`NotionHttp`]。Client は最初の送信時に作る
 #[derive(Default)]
 pub struct ReqwestHttp {
-    client: std::sync::OnceLock<reqwest::Client>,
+    client: tokio::sync::OnceCell<reqwest::Client>,
+}
+
+impl ReqwestHttp {
+    async fn client(&self) -> Result<&reqwest::Client> {
+        self.client
+            .get_or_try_init(|| async {
+                reqwest::Client::builder()
+                    .connect_timeout(CONNECT_TIMEOUT)
+                    .timeout(REQUEST_TIMEOUT)
+                    .build()
+                    .map_err(|e| Error::other(format!("failed to build HTTP client: {e}")))
+            })
+            .await
+    }
 }
 
 #[async_trait]
 impl NotionHttp for ReqwestHttp {
     async fn send(&self, req: NotionHttpRequest) -> Result<NotionHttpResponse> {
-        let client = self.client.get_or_init(reqwest::Client::new);
+        let client = self.client().await?;
         let method = reqwest::Method::from_bytes(req.method.as_bytes())
             .map_err(|e| Error::other(e.to_string()))?;
         let mut builder = client.request(method, &req.url);
         for (k, v) in &req.headers {
-            builder = builder.header(k, v);
+            let mut value = reqwest::header::HeaderValue::from_str(v)
+                .map_err(|_| Error::other(format!("invalid value for header {k}")))?;
+            if k.eq_ignore_ascii_case("authorization") {
+                value.set_sensitive(true);
+            }
+            builder = builder.header(k, value);
         }
         let res = builder
             .body(req.body.to_string())
@@ -226,15 +279,22 @@ impl Tool for NotionPageCreateTool {
             .await?;
         let page_id = page.get("id").cloned();
         if blocks.len() > BLOCKS_PER_REQUEST {
-            let id = encode_uri_component(&crate::tools::js_display(page_id.as_ref()));
+            let raw_id = crate::tools::js_display(page_id.as_ref());
+            let id = encode_uri_component(&raw_id);
             for chunk in blocks[BLOCKS_PER_REQUEST..].chunks(BLOCKS_PER_REQUEST) {
+                // ページはもう作られている。再試行で重複ページを作らないよう page_id を伝える
                 self.client
                     .request(
                         "PATCH",
                         &format!("/blocks/{id}/children"),
                         json!({ "children": chunk }),
                     )
-                    .await?;
+                    .await
+                    .map_err(|e| {
+                        Error::other(format!(
+                            "page {raw_id} was created but appending blocks failed: {e}"
+                        ))
+                    })?;
             }
         }
         let mut out = JsonMap::new();
@@ -359,6 +419,8 @@ mod tests {
         calls: Mutex<Vec<NotionHttpRequest>>,
         status: u16,
         body: String,
+        /// この番号（0 始まり）以降の呼び出しは 500 を返す
+        fail_from: usize,
     }
 
     impl MockHttp {
@@ -367,6 +429,7 @@ mod tests {
                 calls: Mutex::new(vec![]),
                 status: 200,
                 body: body.to_string(),
+                fail_from: usize::MAX,
             })
         }
         fn calls(&self) -> Vec<NotionHttpRequest> {
@@ -377,13 +440,22 @@ mod tests {
     #[async_trait]
     impl NotionHttp for MockHttp {
         async fn send(&self, req: NotionHttpRequest) -> Result<NotionHttpResponse> {
-            self.calls.lock().unwrap().push(req);
+            let n = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(req);
+                calls.len() - 1
+            };
+            let status = if n >= self.fail_from {
+                500
+            } else {
+                self.status
+            };
             Ok(NotionHttpResponse {
-                status: self.status,
-                status_text: if self.status == 200 {
-                    "OK"
-                } else {
-                    "Unauthorized"
+                status,
+                status_text: match status {
+                    200 => "OK",
+                    500 => "Internal Server Error",
+                    _ => "Unauthorized",
                 }
                 .into(),
                 body: self.body.clone(),
@@ -598,12 +670,76 @@ mod tests {
             calls: Mutex::new(vec![]),
             status: 401,
             body: "{}".into(),
+            fail_from: usize::MAX,
         });
         let e = NotionPageUpdateTool::new(client(&http, Some("bad")))
             .invoke(map(json!({ "page_id": "p", "title": "t" })))
             .await
             .unwrap_err();
         assert_eq!(e.to_string(), "Notion API error: 401 Unauthorized");
+    }
+
+    fn lines(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn create_append_escapes_page_id() {
+        let http = MockHttp::ok(json!({ "id": "a/b", "url": "u" }));
+        NotionPageCreateTool::new(client(&http, Some("test-token")))
+            .invoke(map(
+                json!({ "parent_page_id": "p", "title": "t", "content": lines(150) }),
+            ))
+            .await
+            .unwrap();
+        let calls = http.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[1].url,
+            "https://api.notion.com/v1/blocks/a%2Fb/children"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_append_failure_reports_created_page_id() {
+        let http = Arc::new(MockHttp {
+            calls: Mutex::new(vec![]),
+            status: 200,
+            body: json!({ "id": "pid-123", "url": "u" }).to_string(),
+            fail_from: 1,
+        });
+        let e = NotionPageCreateTool::new(client(&http, Some("test-token")))
+            .invoke(map(
+                json!({ "parent_page_id": "p", "title": "t", "content": lines(150) }),
+            ))
+            .await
+            .unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("pid-123"), "{msg}");
+        assert!(msg.contains("Notion API error: 500"), "{msg}");
+        assert_eq!(http.calls().len(), 2);
+    }
+
+    #[test]
+    fn debug_redacts_authorization() {
+        let req = NotionHttpRequest {
+            method: "POST",
+            url: "u".into(),
+            headers: vec![
+                ("Authorization".into(), "Bearer secret_abc".into()),
+                ("Notion-Version".into(), NOTION_VERSION.into()),
+            ],
+            body: json!({}),
+        };
+        let s = format!("{req:?}");
+        assert!(!s.contains("secret_abc"), "{s}");
+        assert!(
+            s.contains("<redacted>") && s.contains(NOTION_VERSION),
+            "{s}"
+        );
     }
 
     #[test]
