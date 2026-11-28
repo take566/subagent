@@ -1,0 +1,14 @@
+[
+  {
+    "id": "msg_replay_review",
+    "model": "claude-opus-5-5",
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"issues\":[{\"type\":\"error\",\"severity\":\"high\",\"line\":2,\"message\":\"`a` has no body to test\",\"rule\":\"empty-fn\"}],\"suggestions\":[\"add a test for a()\"],\"summary\":\"Small function; one issue.\"}"
+      }
+    ],
+    "stop_reason": "end_turn",
+    "usage": { "input_tokens": 120, "output_tokens": 40 }
+  }
+]

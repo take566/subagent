@@ -74,9 +74,14 @@ impl AgentLlmSettings {
             AgentKind::Review => (TokenBudget::review().limit(), 3, false),
             AgentKind::Document => (TokenBudget::document().limit(), 3, false),
         };
+        // review は 1 回の応答に指摘を全部入れるので広めに取る（runner の上限 32000 と同じ）
+        let max_tokens = match kind {
+            AgentKind::Review => 32_000,
+            _ => 16_000,
+        };
         Self {
             model: DEFAULT_MODEL.to_string(),
-            max_tokens: 16_000,
+            max_tokens,
             effort: None,
             token_budget,
             max_iterations,
