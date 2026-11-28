@@ -42,6 +42,15 @@ pub enum Error {
     #[error("{0}")]
     Llm(#[from] crate::llm::LlmError),
 
+    /// typed tool が途中で止まった。`message` は短い要約だけ（ログにも出る。モデルの本文や
+    /// エラーの中身は入れない）。`partial` は途中の結果で、MCP の応答では isError の
+    /// `structuredContent` になる（ログには出さない）
+    #[error("{message}")]
+    Incomplete {
+        message: String,
+        partial: Box<serde_json::Value>,
+    },
+
     #[error("{0}")]
     Other(String),
 }
@@ -59,6 +68,7 @@ impl Error {
             Error::Json(_) => "JsonError",
             Error::Sandbox(_) => "SandboxError",
             Error::Llm(_) => "LlmError",
+            Error::Incomplete { .. } => "Incomplete",
             Error::Other(_) => "Error",
         }
     }

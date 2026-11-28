@@ -162,6 +162,23 @@ async fn not_configured_is_an_error_without_mock_output() {
     assert!(e.to_string().contains("not configured"), "{e}");
 }
 
+/// 送る前の予算の確認: 最初の request の概算も収まらなければ何も送らない
+#[tokio::test]
+async fn tiny_budget_sends_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = scripted(vec![Ok(ScriptedLlm::text_response(&review_json()))]);
+    let mut s = AgentLlmSettings::defaults(AgentKind::Review);
+    s.token_budget = 100; // max_tokens だけで超える
+    let agent = ReviewAgent::with_sandbox(ReviewAgent::default_config(), sandbox(dir.path(), &[]))
+        .with_llm(llm.clone(), s);
+    let e = agent
+        .call_typed(json!({ "code": CODE }), ctx())
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("token budget"), "{e}");
+    assert!(llm.requests().is_empty(), "no request may be sent");
+}
+
 #[tokio::test]
 async fn refusal_is_an_error() {
     let dir = tempfile::tempdir().unwrap();

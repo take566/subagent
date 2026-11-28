@@ -1,0 +1,23 @@
+[
+  {
+    "id": "msg_replay_codegen_refusal_1",
+    "model": "claude-opus-5-5",
+    "content": [
+      {
+        "type": "tool_use",
+        "id": "toolu_replay_r1",
+        "name": "str_replace_based_edit_tool",
+        "input": { "command": "create", "path": "half.txt", "file_text": "SECRET-FILE-CONTENT\n" }
+      }
+    ],
+    "stop_reason": "tool_use",
+    "usage": { "input_tokens": 100, "output_tokens": 50 }
+  },
+  {
+    "id": "msg_replay_codegen_refusal_2",
+    "model": "claude-opus-5-5",
+    "content": [{ "type": "text", "text": "SECRET-REFUSAL-TEXT" }],
+    "stop_reason": "refusal",
+    "usage": { "input_tokens": 200, "output_tokens": 20 }
+  }
+]

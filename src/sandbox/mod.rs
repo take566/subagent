@@ -13,7 +13,7 @@ pub use command::{
     PASSTHROUGH_ENV, TIMEOUT_ENV, child_env, run_command, split_command_line,
 };
 pub use workspace::{
-    ChangeKind, FileChange, MAX_FILE_BYTES_ENV, MAX_FILES_ENV, ROOTS_ENV, Workspace,
+    ChangeKind, FileChange, MAX_FILE_BYTES_ENV, MAX_FILES_ENV, MayWrite, ROOTS_ENV, Workspace,
     WorkspaceLimits, validate_relative,
 };
 
