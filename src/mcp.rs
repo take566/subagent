@@ -955,7 +955,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let c2 = cancel.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
             c2.cancel();
         });
         let r = as_json(
@@ -980,12 +980,8 @@ mod tests {
             .iter()
             .map(|s| s.2.clone().unwrap_or_default())
             .collect();
-        // cancel（3 秒後）より前に送ったものだけ。late（1 秒後）は cancel 前なので届く
-        assert_eq!(
-            messages,
-            ["started fake", "working", "late"],
-            "{messages:?}"
-        );
+        // cancel（0.5 秒後）より前に送ったものだけ。late（1 秒後）は cancel の後なので届かない
+        assert_eq!(messages, ["started fake", "working"], "{messages:?}");
     }
 
     /// 通知を送れない（stdout が詰まった）時も、deadline を大きく過ぎて呼び出しを止めない

@@ -730,7 +730,7 @@ fn spawn_expect_exit(bin: &str, envs: &[(&str, &str)]) -> (std::process::ExitSta
 fn unknown_llm_backend_exits_non_zero() {
     for (_, bin) in all_bins() {
         let (status, stderr) = spawn_expect_exit(bin, &[("SUBAGENT_LLM_BACKEND", "openai")]);
-        assert!(!status.success(), "{bin}: {status}");
+        assert_eq!(status.code(), Some(2), "{bin}: {status}");
         assert!(stderr.contains("SUBAGENT_LLM_BACKEND"), "{stderr}");
     }
 }
@@ -741,7 +741,7 @@ fn unknown_llm_backend_exits_non_zero() {
 fn replay_backend_without_feature_exits_non_zero() {
     for (_, bin) in all_bins() {
         let (status, stderr) = spawn_expect_exit(bin, &[("SUBAGENT_LLM_BACKEND", "replay")]);
-        assert!(!status.success(), "{bin}: {status}");
+        assert_eq!(status.code(), Some(2), "{bin}: {status}");
         assert!(stderr.contains("replay"), "{stderr}");
     }
 }
@@ -755,7 +755,7 @@ fn invalid_deadline_exits_non_zero() {
             env!("CARGO_BIN_EXE_review-server"),
             &[("SUBAGENT_DEADLINE_SECS", v)],
         );
-        assert!(!status.success(), "{v}: {status}");
+        assert_eq!(status.code(), Some(2), "{v}: {status}");
         assert!(stderr.contains("SUBAGENT_DEADLINE_SECS"), "{v}: {stderr}");
     }
 }
@@ -822,7 +822,7 @@ fn invalid_agent_llm_settings_exit_non_zero() {
         ),
     ] {
         let (status, stderr) = spawn_expect_exit(env!("CARGO_BIN_EXE_research-server"), envs);
-        assert!(!status.success(), "{envs:?}: {status}");
+        assert_eq!(status.code(), Some(2), "{envs:?}: {status}");
         assert!(stderr.contains(needle), "{stderr}");
     }
 }
@@ -863,7 +863,7 @@ fn replay_backend_serves_typed_tools() {
         env!("CARGO_BIN_EXE_review-server"),
         &[("SUBAGENT_LLM_BACKEND", "replay")],
     );
-    assert!(!status.success(), "{status}");
+    assert_eq!(status.code(), Some(2), "{status}");
     assert!(stderr.contains("SUBAGENT_LLM_REPLAY_FILE"), "{stderr}");
 }
 
