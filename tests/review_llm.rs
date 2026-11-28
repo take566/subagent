@@ -632,3 +632,28 @@ async fn progress_reports_each_iteration() {
     let got = rec.0.lock().unwrap().clone();
     assert!(got.iter().any(|m| m == "iteration 1"), "{got:?}");
 }
+
+/// lint の出力を足した後にも上限を見る（行番号とメタデータだけなら上限以内のコード）
+#[tokio::test]
+async fn prompt_with_lint_output_over_cap_is_rejected_before_sending() {
+    let dir = tempfile::tempdir().unwrap();
+    let llm = scripted(vec![Ok(ScriptedLlm::text_response(&review_json()))]);
+    let agent = agent_in(dir.path(), &["rustc"], llm.clone())
+        .with_lint_command(Some("rustc --help".into()));
+    let code = format!("//{}", "x".repeat(119_000 - 2));
+    let e = agent
+        .call_typed(json!({ "code": code, "lint": true }), ctx())
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("120000"), "{e}");
+    assert!(llm.requests().is_empty());
+    // lint 無しなら同じコードは送れる（上限を超えたのは lint の出力のせい）
+    agent
+        .call_typed(
+            json!({ "code": format!("//{}", "x".repeat(119_000 - 2)) }),
+            ctx(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(llm.requests().len(), 1);
+}
