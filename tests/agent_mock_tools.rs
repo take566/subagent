@@ -219,12 +219,13 @@ async fn review_happy_path_merges_view_and_lint() {
         ),
     );
 
-    // Rust 版は lint_command 指定時だけ lint を実行する（TS は npm run lint 固定）
+    // Rust 版は lint_command 指定時だけ lint を実行する（TS は npm run lint 固定）。
+    // ファイルは workspace 内の相対 path を source_path で渡す（絶対パスの source_code は読まない）
     let res = agent
         .execute(task(
             "t4",
             "review",
-            json!({ "source_code": "/src/a.ts", "lint_command": "lint" }),
+            json!({ "source_path": "src/a.ts", "lint_command": "lint" }),
         ))
         .await
         .unwrap();
@@ -257,7 +258,7 @@ async fn review_failure_when_view_errors_skips_lint() {
         .execute(task(
             "t4",
             "review",
-            json!({ "source_code": "/missing.ts", "lint_command": "lint" }),
+            json!({ "source_path": "missing.ts", "lint_command": "lint" }),
         ))
         .await
         .unwrap_err();

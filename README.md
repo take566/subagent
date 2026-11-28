@@ -103,7 +103,7 @@ let mut events = orchestrator.subscribe(); // SubagentEvent::Progress / StatusCh
 
 ### 出力先の指定
 
-CodeGen / Document エージェントは既定でカレントディレクトリに出力します。出力先を変える場合:
+CodeGen / Document エージェントは既定で環境変数 `SUBAGENT_ROOTS` の workspace に出力します（未設定ならファイルを書くツールはエラーを返します。カレントディレクトリには書きません）。出力先をコードで指定する場合（無ければ作ります）:
 
 ```rust
 use std::sync::Arc;
@@ -142,12 +142,41 @@ cargo build --release
 |---|---|
 | `AGENT_ID` | エージェントの id を上書きする（前後の空白は除く。空なら既定の id） |
 | `MAX_CONCURRENT` | tools/call の同時実行数の上限。正の整数のときだけ有効で、未設定・不正値は無制限 |
+| `SUBAGENT_ROOTS` | **必須**（ファイル・コマンドのツールを使う場合）。workspace の root の絶対パス。複数なら OS の path 区切り（Windows は `;`、それ以外は `:`）で並べ、相対パスは最初の root 基準。未設定ならツールは拒否する |
+| `SUBAGENT_MAX_FILE_BYTES` | 1 ファイルの上限（既定 1048576 byte）。超えるファイルは読まず、書かない |
+| `SUBAGENT_MAX_FILES` | 1 タスクで書き込むファイル数の上限（既定 200）。エージェントのタスク（`execute`）と direct tool の呼び出しごとに数え直す |
+| `SUBAGENT_CODEGEN_ALLOWED_COMMANDS` | `bash_tool`（CodeGen / Review の lint）で実行してよい program 名（`,` か空白区切り、例 `cargo,npm`）。未設定ならコマンドは実行しない |
+| `SUBAGENT_COMMAND_TIMEOUT_SECS` | コマンドの timeout（既定 120 秒）。超えたら kill する |
 
-> **注意**: CodeGen の `bash_tool` / `file_create` / `str_replace` と Review の `bash_tool` は、任意のコマンド実行・任意パスへの書き込みができます。信頼できるクライアントからのみ使ってください。
+### sandbox（ファイルとコマンドの制限）
+
+ファイルを扱うツール（CodeGen の `file_create` / `str_replace`、Review の `view`）は `SUBAGENT_ROOTS` の中だけを扱います。
+
+- path は root からの相対パスだけ。絶対パス、`..`、`C:` などのドライブ指定、`\\?\` / UNC（`\\server\share`）、`:`（NTFS の代替データストリーム）、Windows の予約名（`CON` / `NUL` / `COM1` など。拡張子付きも）、末尾のドット・空白は拒否します（OS に関係なく）
+- symlink / junction で root の外を指していれば拒否します。open した後にも handle の実パスを確かめるので、確認と open の間に差し替えられても root の外の中身は読まず、書きもしません
+- 通常ファイル以外（FIFO・デバイス・ディレクトリ）は開きません。最後の component は link を辿らずに開きます（Unix は `O_NOFOLLOW | O_NONBLOCK`、Windows は `FILE_FLAG_OPEN_REPARSE_POINT`）
+- 無いディレクトリは 1 段ずつ作り、作るたびに root の中か確かめます
+- ハードリンク（リンク数 2 以上）のファイルは読みも書きもしません
+- エラーメッセージには渡された相対パスだけを載せます（root の外の実パスは載せません）
+
+既知の限界:
+
+- 競合時（確認と作成の間に親ディレクトリを link に差し替えられた場合）、root の外に**空の**ディレクトリやファイルができることがあります。中身は書かず、既存のファイルを空にもしません
+- 書き込み件数（`SUBAGENT_MAX_FILES`）はタスクごとです。同じエージェントで並行して動くタスクは、互いの数えをリセットしえます（上限は目安です）
+- 作成・変更したファイルの記録（`Workspace::changes`）は、同じファイルを別名（8.3 形式の短い名前・大文字小文字違い）で書くと別々に載ります
+- ファイル操作どうしは 1 つずつ実行しますが、コマンドの実行とは直列化しません（コマンドの実行中に同じファイルを読み書きできます）
+
+`bash_tool` は shell を使いません（`cmd /c` / `sh -c` なし）。`command` は「program と引数」で、`"..."` / `'...'` で空白を含む引数を書けます。引用符の外の `|` `&` `;` `<` `>` `(` `)` `$` `` ` `` はエラーです。program は `SUBAGENT_CODEGEN_ALLOWED_COMMANDS` にある名前（path ではなく名前）だけで、PATH から探します。cwd は workspace（`cwd` 引数は root からの相対パス。`.` か空なら root）、stdin は null、出力は stdout / stderr それぞれ 3 万文字で切ります。
+
+子プロセスの環境変数は `PATH` / `HOME` / `USERPROFILE` / `TEMP` / `TMP` / `TMPDIR` / `SystemRoot` と、Windows の tool chain が使う `APPDATA` / `LOCALAPPDATA` / `ProgramData` / `SystemDrive` / `PATHEXT` / `ComSpec` だけです。`ANTHROPIC_API_KEY` / `SUBAGENT_ANTHROPIC_API_KEY` / `NOTION_TOKEN` などは渡しません。`PATH` からは、相対の entry と workspace の中を指す entry を除きます（workspace に置いた同名の program を拾わないように）。
+
+Windows では allowlist にも program にも `.exe` 以外の拡張子（`.bat` / `.cmd` など）は使えません（`cmd.exe` を通って実行されるため）。`npm` のような `.cmd` だけの program は実行できません。
+
+> **警告: allowlist は sandbox ではありません。** `cargo` は `build.rs` を、`npm` は package の script を実行するので、許可した program を通じて任意のコードが動き、workspace の外も読み書きできます。timeout で kill するのは直接の子プロセスだけで、孫プロセスは残ることがあります。`cargo` / `npm` / `python` などを許可するのは、コンテナや WSL など、壊れても困らない隔離された環境の中だけにしてください。ホストで動かす場合は `SUBAGENT_CODEGEN_ALLOWED_COMMANDS` を設定しないでください。
 
 ### Review エージェントの lint
 
-`source_code`（文字列）は必須で、`/` で始まるか絶対パスならファイルとして読み込みます。`lint_command` パラメータを指定したときだけ lint を実行します（例: `{"source_code": "...", "lint_command": "cargo clippy"}`）。出力は形式から言語を推定して解釈します。ESLint（stylish）・tsc・flake8 / ruff の行は `file` / `line` / `column` / `rule` / `tool` / `language` 付きの指摘になり、どれにも当たらない場合は `error` / `warning` を含む行が指摘になります（`tool: "generic"`）。stdout と stderr の両方を解釈します。ruff は既定の出力形式では行に当たらないので `ruff check --output-format concise` を指定してください。
+コードは `source_code`（文字列）か `source_path`（`SUBAGENT_ROOTS` 内の相対パス。`view` ツールで読みます）で渡します。1 行で `/` 始まりか絶対パスの `source_code` はファイルを読まずにエラーにします（workspace の外のファイルは読みません）。`lint_command` パラメータを指定したときだけ lint を実行します（例: `{"source_code": "...", "lint_command": "cargo clippy"}`）。lint も `bash_tool` と同じく shell なしで、program が `SUBAGENT_CODEGEN_ALLOWED_COMMANDS` に無ければ実行せずに（warn ログを出して）lint 無しで続けます。`cwd` パラメータは workspace 内の相対パスです。出力は形式から言語を推定して解釈します。ESLint（stylish）・tsc・flake8 / ruff の行は `file` / `line` / `column` / `rule` / `tool` / `language` 付きの指摘になり、どれにも当たらない場合は `error` / `warning` を含む行が指摘になります（`tool: "generic"`）。stdout と stderr の両方を解釈します。ruff は既定の出力形式では行に当たらないので `ruff check --output-format concise` を指定してください。
 
 ### Document Agent の Notion 連携
 
@@ -178,6 +207,7 @@ src/
 ├── core/            # Subagent トレイト・共通状態・ツールレジストリ
 ├── orchestrator/    # Orchestrator・Task Parser・Planner・Result Aggregator
 ├── protocol.rs      # A2A プロトコル
+├── sandbox/         # Workspace（SUBAGENT_ROOTS）と run_command（allowlist）
 ├── tools/           # 組み込みツール（lint_parsers: lint 出力パーサ、notion: Notion API）
 ├── mcp.rs           # MCP サーバー
 ├── types.rs         # 型定義
@@ -186,7 +216,8 @@ src/
 └── bin/             # MCP サーバーのエントリーポイント
 tests/
 ├── orchestrator.rs  # Orchestrator の結合テスト
-├── mcp_golden.rs    # MCP 出力を TS 版の記録（golden）と比較
+├── mcp_golden.rs    # MCP 出力を TS 版の記録（golden）と比較。sandbox の MCP 経由の確認も
+├── sandbox.rs       # path の拒否・link での脱出・TOCTOU・上限・コマンドの制限
 └── golden/          # TS 版 MCP サーバーの出力記録
 ```
 

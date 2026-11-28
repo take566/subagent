@@ -256,21 +256,88 @@ async fn failed_task_is_recorded_in_history() {
     assert_eq!(s.metrics.success_rate, 0.0);
 }
 
+/// lint は allowlist にある program だけを shell なしで実行する
+fn review_with_lint(dir: &std::path::Path, programs: &[&str]) -> ReviewAgent {
+    use subagent::sandbox::{CommandPolicy, Sandbox, Workspace};
+    ReviewAgent::with_sandbox(
+        ReviewAgent::default_config(),
+        Arc::new(Sandbox::new(
+            Workspace::new(vec![dir.to_path_buf()]).unwrap(),
+            CommandPolicy::allow(programs),
+        )),
+    )
+}
+
+#[cfg(windows)]
+const LINT_ECHO: (&str, &str) = ("cmd", "cmd /c echo 1 error here");
+#[cfg(not(windows))]
+const LINT_ECHO: (&str, &str) = ("echo", "echo 1 error here");
+
 #[tokio::test]
 async fn review_runs_lint_command_when_given() {
-    let agent = ReviewAgent::new();
+    let dir = tempfile::tempdir().unwrap();
+    let agent = review_with_lint(dir.path(), &[LINT_ECHO.0]);
     let r = agent
         .execute(Task::new(
             "l",
             "review",
-            // 先頭が `/` だと（TS 版と同じく）ファイルパス扱いになるので、コメントは行末に置く
-            json!({ "source_code": "x // c", "lint_command": "echo 1 error here" }),
+            // 1 行で先頭が `/` だと絶対パス扱いで拒否されるので、コメントは行末に置く
+            json!({ "source_code": "x // c", "lint_command": LINT_ECHO.1 }),
         ))
         .await
         .unwrap();
     let res = r.result.unwrap();
     assert_eq!(res["issues"][0]["type"], "error");
     assert_eq!(res["score"], 90);
+}
+
+/// allowlist に無い lint は実行せず（warn を出して）lint 無しで続ける
+#[tokio::test]
+async fn review_skips_lint_that_is_not_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    for agent in [
+        review_with_lint(dir.path(), &[]),
+        review_with_lint(dir.path(), &["cargo"]),
+    ] {
+        let r = agent
+            .execute(Task::new(
+                "l",
+                "review",
+                json!({ "source_code": "x // c", "lint_command": LINT_ECHO.1 }),
+            ))
+            .await
+            .unwrap();
+        let res = r.result.unwrap();
+        assert_eq!(res["issues"], json!([]), "{res}");
+        assert_eq!(res["score"], 100);
+    }
+}
+
+/// review は workspace 内の source_path だけを読み、絶対パスの source_code は読まない
+#[tokio::test]
+async fn review_reads_only_workspace_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "// c\nfn a() {}\n").unwrap();
+    let secret = outside.path().join("s.rs");
+    std::fs::write(&secret, "secret").unwrap();
+    let agent = review_with_lint(dir.path(), &[]);
+    let r = agent
+        .execute(Task::new("r", "review", json!({ "source_path": "a.rs" })))
+        .await
+        .unwrap();
+    assert_eq!(r.metrics.unwrap().tools_called, Some(1));
+    for params in [
+        json!({ "source_code": secret.to_string_lossy() }),
+        json!({ "source_path": secret.to_string_lossy() }),
+        json!({ "source_path": "../s.rs" }),
+    ] {
+        let e = agent
+            .execute(Task::new("r", "review", params.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(e.name(), "SandboxError", "{params}: {e}");
+    }
 }
 
 #[tokio::test]
@@ -608,4 +675,46 @@ async fn hierarchical_execute_reports_parent_task_id() {
         .map(|c| c["task_id"].as_str().unwrap())
         .collect();
     assert_eq!(kids, vec!["k1", "k2"]);
+}
+
+/// 書き込み件数の上限はタスクごと（長く動く MCP server が上限で止まらない）
+#[tokio::test]
+async fn file_limit_is_counted_per_task() {
+    use subagent::sandbox::{CommandPolicy, Sandbox, Workspace, WorkspaceLimits};
+    let sandbox_with = |dir: &std::path::Path, max_files: usize| {
+        Arc::new(Sandbox::new(
+            Workspace::with_limits(
+                vec![dir.to_path_buf()],
+                WorkspaceLimits {
+                    max_files,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+            CommandPolicy::disabled(),
+        ))
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // 1 タスクで 2 ファイル（本体とテスト）を書く。上限 2 なら、別の名前で何回やっても通る
+    let cg =
+        CodeGenAgent::with_sandbox(CodeGenAgent::default_config(), sandbox_with(dir.path(), 2));
+    for lang in ["typescript", "javascript", "typescript"] {
+        cg.execute(Task::new(
+            "c",
+            "codegen",
+            json!({ "specification": "s", "language": lang }),
+        ))
+        .await
+        .unwrap();
+    }
+    assert!(dir.path().join("generated.js.test.js").exists());
+    // 上限 1 なら 1 タスクの中で超えるので失敗
+    let dir = tempfile::tempdir().unwrap();
+    let cg =
+        CodeGenAgent::with_sandbox(CodeGenAgent::default_config(), sandbox_with(dir.path(), 1));
+    let e = cg
+        .execute(Task::new("c", "codegen", json!({ "specification": "s" })))
+        .await
+        .unwrap_err();
+    assert_eq!(e.name(), "SandboxError", "{e}");
 }

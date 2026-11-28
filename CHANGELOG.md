@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased]
+
+### 追加
+- `sandbox` モジュール（`Workspace` / `run_command` / `Sandbox`）。ファイル操作を `SUBAGENT_ROOTS` の中に閉じ込め、コマンドを allowlist の program だけに絞る
+  - `Workspace::resolve` は絶対パス・`..`・`C:`・`\\?\` / UNC・`:`（代替データストリーム）・Windows の予約名（拡張子付きも）・末尾のドット / 空白を拒否し、最寄りの既存祖先を canonicalize して root の中か確かめる。open 後に handle の実パス（Windows `GetFinalPathNameByHandleW`、Linux `/proc/self/fd`、macOS `F_GETPATH`）も確かめる
+  - text editor 向けの操作 `view`（行番号付き）/ `create` / `str_replace`（ちょうど 1 回だけ一致したときに置換）/ `insert`、作成・変更したファイルの追跡（`changes()`）、サイズ（`SUBAGENT_MAX_FILE_BYTES`、既定 1 MiB）と件数（`SUBAGENT_MAX_FILES`、既定 200）の上限
+  - `run_command` は既定で無効。`SUBAGENT_CODEGEN_ALLOWED_COMMANDS` の bare な program 名だけを shell なしで実行し、cwd は workspace、stdin は null、timeout（`SUBAGENT_COMMAND_TIMEOUT_SECS`、既定 120 秒）で kill、出力は 3 万文字で切る。子の env は `PATH`（相対 entry は除く）/ `HOME` / `USERPROFILE` / `TEMP` / `TMP` / `TMPDIR` / `SystemRoot` だけ
+- `Error::Sandbox`（`name()` は `SandboxError`）
+- `CodeGenAgent::with_sandbox` / `default_tools_in`、`ReviewAgent::with_sandbox` / `default_tools_in`
+- Review の `source_path` パラメータ（workspace 内の相対パスのファイルを読む）
+
+### 挙動の変更（sandbox）
+- `file_create` / `str_replace` / `view` は `SUBAGENT_ROOTS`（または `with_options` の `base_dir`）の中の相対パスだけを扱う。roots が無ければエラー（`SUBAGENT_ROOTS is not set ...`）を返し、カレントディレクトリには書かない。絶対パスや `..` はエラー。ツール名と引数の定義は変えていない
+- `file_create` の結果の `path` は「設定どおりの root + 相対パス」
+- `bash_tool`（CodeGen）と Review の lint（`bash_tool` / `lint_command`）は shell を通さなくなった（`cmd /d /s /c` / `/bin/sh -c` を廃止）。`SUBAGENT_CODEGEN_ALLOWED_COMMANDS` が無ければエラー。引用符の外の shell の構文（`|` `&&` `;` `>` `$(...)` など）はエラー。`cwd` は workspace 内の相対パス。時間切れなら `timed_out: true`、出力を切ったら `truncated: true` が付く。program を起動できなければツールのエラーになる（以前は `success: false`）
+- Review は絶対パスの `source_code` を読まなくなった（1 行で `/` 始まりか絶対パスならエラー）。ファイルは `source_path` で workspace 内の相対パスを渡す。複数行の `source_code` は `//` で始まってもコードとして扱う。`source_code` の interface 定義は `required: false` になった（`source_path` とどちらか）
+- lint が allowlist に無いなどで実行できないときは、これまでどおり warn を出して lint 無しで続ける
+- `FileCreateTool::new` / `StrReplaceTool::new` は `Arc<Sandbox>` を取る。`ViewTool` / `BashTool` / `LintTool` は `Default` をやめて `new(Arc<Sandbox>)` になった。`tools::run_shell` / `ShellOutput` / `resolve_path` は削除した
+- `CodeGenAgent::new()` / `DocumentAgent::new()` / `create_default_orchestrator()` は `SUBAGENT_ROOTS` を workspace にする（未設定ならファイルを作るタスクは失敗する）。`with_options(.., Some(dir))` は `dir` を root にする（無ければ作る）
+- テスト: golden の MCP サーバーは作業ディレクトリを `SUBAGENT_ROOTS` にして起動する（golden の記録は変えていない）
+
+### sandbox の追加修正（PR #77 の review）
+- 通常ファイル以外（FIFO など）は開かずに拒否する。以前は Linux で FIFO を open すると lock を握ったまま止まった。最後の component は link を辿らずに開く（Unix `O_NOFOLLOW | O_NONBLOCK`、Windows `FILE_FLAG_OPEN_REPARSE_POINT`）
+- `SUBAGENT_MAX_FILES` はタスクごとの上限になった（`Workspace::begin_task`。エージェントの `run_task` と MCP の direct tool の呼び出しごとに数え直す）。以前は process 全体で数えたので、長く動く MCP server は 200 件で書けなくなった。`changes()` も今のタスクの分だけを返す。`Tool` trait に既定で何もしない `begin_task` を追加した
+- 無いディレクトリは 1 段ずつ作り、作るたびに root の中か確かめる（`create_dir_all` をやめた）
+- エラーメッセージに root の外の実パスを載せない（渡された相対パスだけ）
+- `resolve_dir`（コマンドの `cwd`）は `.` と空文字を root として受け付ける
+- Review: `// TODO` のような `/` で始まる 1 行のコードを、パスとして拒否しなくなった（パスらしい値だけを拒否する）
+- Windows: allowlist と program の名前に `.exe` 以外の拡張子（`.bat` / `.cmd`）を使えない
+- 子に渡す `PATH` から workspace の中を指す entry を除く。Windows 向けに `APPDATA` / `LOCALAPPDATA` / `ProgramData` / `SystemDrive` / `PATHEXT` / `ComSpec` も渡す
+- 読み出しもリンク数 2 以上のファイルを拒否する（書き込みと同じ）
+- CI に `macos-latest` を追加した（macOS の `F_GETPATH` の実装をコンパイルする）
+- 既知の限界（README に記載）: 競合時に root の外に空のファイル / ディレクトリができうる（中身は書かない）、`changes()` は別名（8.3・大文字小文字）を別々に載せる、コマンドはファイル操作と直列化しない、timeout で kill するのは直接の子だけ
+
 ## [1.1.0] - 2026-11-28
 
 ### 変更

@@ -15,6 +15,9 @@ pub trait Tool: Send + Sync {
     /// パラメータ定義（`{ "<name>": { "type": ..., "required": ... } }`）
     fn parameters(&self) -> &JsonMap;
     async fn invoke(&self, params: JsonMap) -> Result<Value>;
+
+    /// タスクの始まりに呼ばれる（sandbox のツールはタスクごとの書き込み件数を数え直す）
+    fn begin_task(&self) {}
 }
 
 /// ツールの登録先。登録順を保持する（TS の `Map` と同じ）。

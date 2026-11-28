@@ -44,6 +44,14 @@ thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
 uuid = { version = "1.29.3", features = ["v4"] }
 
+# sandbox: open 済み handle の実 path（TOCTOU 対策）
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+# O_NOFOLLOW / O_NONBLOCK / fcntl（macOS は F_GETPATH も）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+
 [dev-dependencies]
 tempfile = "3.27.0"
 wiremock = "0.6.5"

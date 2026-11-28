@@ -18,8 +18,11 @@ struct Client {
 }
 
 impl Client {
+    /// 作業ディレクトリを workspace root（`SUBAGENT_ROOTS`）にして起動する
     fn spawn(bin: &str, cwd: &Path) -> Client {
-        Self::spawn_with(bin, cwd, &[], Stdio::null())
+        let root = std::path::absolute(cwd).unwrap();
+        let root = root.to_string_lossy().into_owned();
+        Self::spawn_with(bin, cwd, &[("SUBAGENT_ROOTS", &root)], Stdio::null())
     }
 
     fn spawn_with(bin: &str, cwd: &Path, envs: &[(&str, &str)], stderr: Stdio) -> Client {
@@ -28,6 +31,11 @@ impl Client {
             .env("SUBAGENT_LOG_LEVEL", "debug") // ログが stdout を汚さないことも確かめる
             .env_remove("AGENT_ID")
             .env_remove("MAX_CONCURRENT")
+            .env_remove("SUBAGENT_ROOTS")
+            .env_remove("SUBAGENT_CODEGEN_ALLOWED_COMMANDS")
+            .env_remove("SUBAGENT_COMMAND_TIMEOUT_SECS")
+            .env_remove("SUBAGENT_MAX_FILES")
+            .env_remove("SUBAGENT_MAX_FILE_BYTES")
             // 開発機や CI にトークンがあっても、golden の Notion 呼び出しで本物の API を叩かない
             .env_remove("NOTION_TOKEN")
             .envs(envs.iter().copied())
@@ -48,6 +56,29 @@ impl Client {
     fn send(&mut self, msg: Value) {
         writeln!(self.stdin, "{msg}").unwrap();
         self.stdin.flush().unwrap();
+    }
+
+    fn initialize(&mut self) {
+        self.request(
+            "initialize",
+            json!({ "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } }),
+        );
+        self.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+    }
+
+    /// tools/call して (isError, text) を返す
+    fn call(&mut self, name: &str, arguments: Value) -> (bool, String) {
+        let r = self.request(
+            "tools/call",
+            json!({ "name": name, "arguments": arguments }),
+        );
+        (
+            r["isError"].as_bool().unwrap_or(false),
+            r["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        )
     }
 
     fn request(&mut self, method: &str, params: Value) -> Value {
@@ -308,4 +339,183 @@ fn agent_id_env_is_applied() {
     );
     // タスク中のツールログには task_id が載る（TS #44）
     assert!(log.contains("\"task_id\": \"e1\""), "task_id: {log}");
+}
+
+// ---------------------------------------------------------------------------
+// sandbox（SUBAGENT_ROOTS / SUBAGENT_CODEGEN_ALLOWED_COMMANDS）
+// ---------------------------------------------------------------------------
+
+/// roots 未設定なら書き込み系のツールは拒否し、cwd にも書かない
+#[test]
+fn codegen_without_roots_refuses_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Client::spawn_with(
+        env!("CARGO_BIN_EXE_codegen-server"),
+        dir.path(),
+        &[],
+        Stdio::null(),
+    );
+    c.initialize();
+    let (err, text) = c.call(
+        "execute",
+        json!({ "action": "codegen", "parameters": { "specification": "x" } }),
+    );
+    assert!(err, "{text}");
+    assert!(text.contains("SUBAGENT_ROOTS"), "{text}");
+    let (err, text) = c.call("file_create", json!({ "path": "a.txt", "content": "x" }));
+    assert!(err && text.contains("SUBAGENT_ROOTS"), "{text}");
+    let (err, text) = c.call(
+        "str_replace",
+        json!({ "file": "a.txt", "search": "x", "replace": "y" }),
+    );
+    assert!(err && text.contains("SUBAGENT_ROOTS"), "{text}");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+/// review の view も roots 未設定なら読まない
+#[test]
+fn review_view_without_roots_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+    let mut c = Client::spawn_with(
+        env!("CARGO_BIN_EXE_review-server"),
+        dir.path(),
+        &[],
+        Stdio::null(),
+    );
+    c.initialize();
+    let (err, text) = c.call("view", json!({ "path": "a.rs" }));
+    assert!(err && text.contains("SUBAGENT_ROOTS"), "{text}");
+}
+
+/// workspace の外（絶対 path / `..`）は読み書きしない
+#[test]
+fn paths_outside_workspace_are_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, "top secret").unwrap();
+    let abs = secret.to_string_lossy().into_owned();
+
+    let mut c = Client::spawn(env!("CARGO_BIN_EXE_review-server"), root.path());
+    c.initialize();
+    let (err, text) = c.call("view", json!({ "path": abs }));
+    assert!(err && !text.contains("top secret"), "{text}");
+    let (err, text) = c.call(
+        "execute",
+        json!({ "action": "review", "parameters": { "source_code": abs } }),
+    );
+    assert!(err && !text.contains("top secret"), "{text}");
+    // workspace 内のファイルは `source_path` で読める
+    std::fs::write(root.path().join("in.rs"), "// c\nfn a() {}\n").unwrap();
+    let (err, text) = c.call(
+        "execute",
+        json!({ "action": "review", "parameters": { "source_path": "in.rs" } }),
+    );
+    assert!(!err, "{text}");
+    assert!(text.contains("\"tools_called\": 1"), "{text}");
+
+    let mut c = Client::spawn(env!("CARGO_BIN_EXE_codegen-server"), root.path());
+    c.initialize();
+    let rel = "../".repeat(20) + "escape.txt";
+    for (tool, args) in [
+        ("file_create", json!({ "path": abs, "content": "pwned" })),
+        ("file_create", json!({ "path": rel, "content": "pwned" })),
+        (
+            "str_replace",
+            json!({ "file": abs, "search": "top", "replace": "pwned" }),
+        ),
+    ] {
+        let (err, text) = c.call(tool, args.clone());
+        assert!(err, "{tool} {args}: {text}");
+    }
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "top secret");
+}
+
+/// bash_tool は allowlist が無ければ使えない
+#[test]
+fn bash_tool_is_disabled_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Client::spawn(env!("CARGO_BIN_EXE_codegen-server"), dir.path());
+    c.initialize();
+    let (err, text) = c.call("bash_tool", json!({ "command": "echo hi" }));
+    assert!(err, "{text}");
+    assert!(text.contains("SUBAGENT_CODEGEN_ALLOWED_COMMANDS"), "{text}");
+    let mut c = Client::spawn(env!("CARGO_BIN_EXE_review-server"), dir.path());
+    c.initialize();
+    let (err, text) = c.call("bash_tool", json!({ "command": "echo 1 error here" }));
+    assert!(
+        err && text.contains("SUBAGENT_CODEGEN_ALLOWED_COMMANDS"),
+        "{text}"
+    );
+}
+
+#[cfg(windows)]
+const ENV_DUMP: (&str, &str) = ("cmd", "cmd /c set");
+#[cfg(not(windows))]
+const ENV_DUMP: (&str, &str) = ("env", "env");
+
+/// 子プロセスに API 鍵・Notion token が渡らない。shell の構文も通らない
+#[test]
+fn bash_tool_child_env_has_no_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::path::absolute(dir.path()).unwrap();
+    let root = root.to_string_lossy().into_owned();
+    let mut c = Client::spawn_with(
+        env!("CARGO_BIN_EXE_codegen-server"),
+        dir.path(),
+        &[
+            ("SUBAGENT_ROOTS", &root),
+            ("SUBAGENT_CODEGEN_ALLOWED_COMMANDS", ENV_DUMP.0),
+            ("ANTHROPIC_API_KEY", "sk-ant-leak-1"),
+            ("SUBAGENT_ANTHROPIC_API_KEY", "sk-ant-leak-2"),
+            ("NOTION_TOKEN", "ntn-leak-3"),
+        ],
+        Stdio::null(),
+    );
+    c.initialize();
+    let (err, text) = c.call("bash_tool", json!({ "command": ENV_DUMP.1 }));
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    let stdout = v["stdout"].as_str().unwrap();
+    assert!(stdout.to_uppercase().contains("PATH="), "{stdout}");
+    for leak in [
+        "sk-ant-leak-1",
+        "sk-ant-leak-2",
+        "ntn-leak-3",
+        "ANTHROPIC_API_KEY=",
+        "NOTION_TOKEN=",
+    ] {
+        assert!(!stdout.contains(leak), "{leak} reached the child: {stdout}");
+    }
+    // 許可外の program と shell の構文は拒否
+    let (err, text) = c.call("bash_tool", json!({ "command": "rustc --version" }));
+    assert!(err, "{text}");
+    let (err, text) = c.call(
+        "bash_tool",
+        json!({ "command": format!("{} && echo pwned", ENV_DUMP.1) }),
+    );
+    assert!(err, "{text}");
+}
+
+/// direct tool の呼び出しも 1 回ずつ別タスクとして数える（SUBAGENT_MAX_FILES を超えて作れる）
+#[test]
+fn direct_tool_calls_count_files_per_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::path::absolute(dir.path()).unwrap();
+    let root = root.to_string_lossy().into_owned();
+    let mut c = Client::spawn_with(
+        env!("CARGO_BIN_EXE_codegen-server"),
+        dir.path(),
+        &[("SUBAGENT_ROOTS", &root), ("SUBAGENT_MAX_FILES", "2")],
+        Stdio::null(),
+    );
+    c.initialize();
+    for i in 0..5 {
+        let (err, text) = c.call(
+            "file_create",
+            json!({ "path": format!("f{i}.txt"), "content": "x" }),
+        );
+        assert!(!err, "call {i}: {text}");
+    }
 }

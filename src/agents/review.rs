@@ -3,6 +3,7 @@
 use crate::core::subagent::{AgentBase, Subagent};
 use crate::core::tool::Tool;
 use crate::error::{Error, Result};
+use crate::sandbox::Sandbox;
 use crate::tools::{LintTool, ViewTool};
 use crate::types::{
     Backoff, BehaviorConfig, ErrorAction, ErrorHandlingStrategy, InterfaceConfig, JsonMap,
@@ -46,7 +47,9 @@ impl ReviewAgent {
             },
             interface: InterfaceConfig {
                 input: vec![
-                    ParameterDefinition::new("source_code", "string", true),
+                    // source_code（コードの文字列）か source_path（workspace 内の相対 path）のどちらか
+                    ParameterDefinition::new("source_code", "string", false),
+                    ParameterDefinition::new("source_path", "string", false),
                     ParameterDefinition::new("criteria", "object", false),
                     ParameterDefinition::new("lint_command", "string", false),
                 ],
@@ -78,9 +81,22 @@ impl ReviewAgent {
         Self::with_tools(config, Self::default_tools())
     }
 
-    /// 既定のツール（view / bash_tool(lint)）
+    /// sandbox を指定して作る
+    pub fn with_sandbox(config: SubagentConfig, sandbox: Arc<Sandbox>) -> Self {
+        Self::with_tools(config, Self::default_tools_in(sandbox))
+    }
+
+    /// 既定のツール（view / bash_tool(lint)）。workspace と lint の allowlist は env から読む
     pub fn default_tools() -> Vec<Arc<dyn Tool>> {
-        vec![Arc::new(ViewTool::default()), Arc::new(LintTool::default())]
+        Self::default_tools_in(Arc::new(Sandbox::from_env()))
+    }
+
+    /// 既定のツールを、指定した sandbox で作る
+    pub fn default_tools_in(sandbox: Arc<Sandbox>) -> Vec<Arc<dyn Tool>> {
+        vec![
+            Arc::new(ViewTool::new(sandbox.clone())),
+            Arc::new(LintTool::new(sandbox)),
+        ]
     }
 
     /// ツールを差し替えて作る（テストでモックツールを渡す用）
@@ -110,9 +126,29 @@ impl ReviewAgent {
         }
     }
 
-    /// `source_code` がファイルパスか（TS は `/` 始まりのみ。Windows の絶対パスも扱う）
+    /// `source_code` が（コードではなく）絶対パスに見えるか。こうした値は読まずに拒否する。
+    ///
+    /// 1 行で `/` 始まりか絶対パス（Windows の `C:\...` も）で、さらにパスらしいもの
+    /// （コメント `//` `/*` で始まらない、コードの記号 `(){};=<>"'` などを含まない、`/` 始まりなら
+    /// 空白を含まない、2 段以上か拡張子付き）だけ。`// TODO` のような 1 行のコードはコードとして扱う
     fn is_file_path(s: &str) -> bool {
-        s.starts_with('/') || Path::new(s).is_absolute()
+        if s.contains('\n') || s.starts_with("//") || s.starts_with("/*") {
+            return false;
+        }
+        if !(s.starts_with('/') || Path::new(s).is_absolute()) {
+            return false;
+        }
+        if s.chars().any(|c| "(){};=<>\"'`|&$,!".contains(c)) {
+            return false;
+        }
+        if s.starts_with('/') && s.chars().any(char::is_whitespace) {
+            return false;
+        }
+        let segs: Vec<&str> = s.split(['/', '\\']).filter(|x| !x.is_empty()).collect();
+        segs.len() >= 2
+            || segs
+                .last()
+                .is_some_and(|l| l.contains('.') && !l.starts_with('.') && !l.ends_with('.'))
     }
 
     /// コードを分析
@@ -169,28 +205,40 @@ impl Subagent for ReviewAgent {
     async fn execute(&self, task: Task) -> Result<TaskResult> {
         let base = &self.base;
         base.run_task(&task, &self.error_handler, "REVIEW_ERROR", || async {
-            let source = task.parameters.get("source_code");
             let mut tools_called = 0u64;
 
             base.report_progress(&task.id, 0.2, "コードレビューを開始");
 
-            // 1. コードを読み込み
-            // TS 版は文字列以外（未指定を含む）で TypeError → failed になる
-            let Some(Value::String(source)) = source else {
-                return Err(Error::InvalidParameter(
-                    "`source_code` (string) is required".into(),
-                ));
-            };
-            let code = if Self::is_file_path(source) {
+            // 1. コードを読み込み。ファイルは workspace 内の相対 path（source_path）だけを読む
+            let code = if let Some(path) = task.parameters.get("source_path") {
+                let Value::String(path) = path else {
+                    return Err(Error::InvalidParameter(
+                        "`source_path` must be a string".into(),
+                    ));
+                };
                 let mut p = JsonMap::new();
-                p.insert("path".into(), json!(source));
-                let info = base.call_tool("view", p).await?;
+                p.insert("path".into(), json!(path));
                 tools_called += 1;
+                let info = base.call_tool("view", p).await?;
                 info.get("content")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string()
             } else {
+                // TS 版は文字列以外（未指定を含む）で TypeError → failed になる
+                let Some(Value::String(source)) = task.parameters.get("source_code") else {
+                    return Err(Error::InvalidParameter(
+                        "`source_code` (string) is required".into(),
+                    ));
+                };
+                if Self::is_file_path(source) {
+                    return Err(Error::Sandbox(
+                        "`source_code` looks like an absolute path; files outside the workspace \
+                         are not read. Pass the code itself, or a path relative to \
+                         SUBAGENT_ROOTS in `source_path`"
+                            .into(),
+                    ));
+                }
                 source.clone()
             };
             base.report_progress(&task.id, 0.4, "コード読み込み完了");
@@ -262,7 +310,28 @@ mod tests {
     fn file_path_detection() {
         assert!(ReviewAgent::is_file_path("/src/a.rs"));
         assert!(!ReviewAgent::is_file_path("fn main() {}"));
+        // 複数行ならコード（`//` コメント始まりでも）
+        assert!(!ReviewAgent::is_file_path("// c\nfn main() {}"));
         #[cfg(windows)]
         assert!(ReviewAgent::is_file_path(r"C:\src\a.rs"));
+        #[cfg(windows)]
+        assert!(ReviewAgent::is_file_path(r"C:\Users\John Smith\a.rs"));
+        // パスらしい 1 行
+        for p in ["/etc/passwd", "/src/a.ts", "/a.rs", "/home/u/x/y"] {
+            assert!(ReviewAgent::is_file_path(p), "{p}");
+        }
+        // `/` で始まる 1 行のコード
+        for code in [
+            "// TODO",
+            "//",
+            "/* doc */ fn a() {}",
+            "/*x*/",
+            "/x",
+            "/ 2",
+            "/regex/.test(s)",
+            "/a/b; rm -rf x",
+        ] {
+            assert!(!ReviewAgent::is_file_path(code), "{code}");
+        }
     }
 }
